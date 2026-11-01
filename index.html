@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PCBx2energy — Text to PCB</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231f7a3a'/><path d='M8 10h8v6h8' stroke='%23e3b341' stroke-width='3' fill='none'/><circle cx='8' cy='10' r='3' fill='%23ddd'/><circle cx='24' cy='16' r='3' fill='%23ddd'/><circle cx='12' cy='23' r='3' fill='%23ddd'/></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">⚡</span> PCBx2energy <span class="tag">Text → PCB</span></div>
+    <div class="fab-picker" role="radiogroup" aria-label="Fabrication house">
+      <span class="lbl">Fab:</span>
+      <button data-fab="jlcpcb" class="seg active">JLCPCB</button>
+      <button data-fab="pcbway" class="seg">PCBWay</button>
+      <button data-fab="oshpark" class="seg">OSH Park</button>
+    </div>
+    <div class="top-actions">
+      <span id="ai-mode" class="pill"></span>
+      <button id="btn-settings" class="ghost" title="Settings">⚙ Settings</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="left">
+      <section class="card">
+        <label class="h" for="prompt">Describe your board</label>
+        <textarea id="prompt" rows="5" placeholder="e.g. ESP32 board with USB-C power, 3.3V regulator, BME280 sensor on I2C, status LED and 4 mounting holes, 50x40mm"></textarea>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="refine" /> Modify current design</label>
+          <span class="grow"></span>
+          <button id="btn-cancel" class="ghost hidden">Cancel</button>
+          <button id="btn-generate" class="primary">Generate PCB</button>
+        </div>
+        <div class="examples" id="examples"></div>
+      </section>
+
+      <section class="card">
+        <div class="h">Activity</div>
+        <div id="status" class="status idle">Ready.</div>
+        <div class="progress"><div id="progress-bar"></div></div>
+        <ul id="log" class="log"></ul>
+      </section>
+
+      <details class="card" id="rules">
+        <summary class="h">Design rules</summary>
+        <div class="grid2">
+          <label>Signal track (mm)<input type="number" step="0.05" min="0.1" id="r-track" /></label>
+          <label>Power track (mm)<input type="number" step="0.05" min="0.1" id="r-power" /></label>
+          <label>Clearance (mm)<input type="number" step="0.05" min="0.1" id="r-clear" /></label>
+          <label>Via Ø / drill (mm)<span class="pair"><input type="number" step="0.05" id="r-via" /><input type="number" step="0.05" id="r-drill" /></span></label>
+          <label>Board thickness<select id="r-thick"><option>0.8</option><option>1.0</option><option>1.2</option><option selected>1.6</option><option>2.0</option></select></label>
+          <label>Surface finish<select id="r-finish"><option>HASL</option><option>ENIG</option></select></label>
+          <label>Solder mask<select id="r-mask">
+            <option value="#1f7a3a">Green</option><option value="#5b2a86">Purple</option><option value="#1a1a1a">Black</option>
+            <option value="#1d4f9c">Blue</option><option value="#b3202a">Red</option><option value="#f0f0f0">White</option><option value="#d9a520">Yellow</option>
+          </select></label>
+          <label class="chk"><input type="checkbox" id="r-pour" /> GND pour (bottom)</label>
+        </div>
+        <button id="btn-reroute" class="ghost full">Re-place &amp; re-route</button>
+      </details>
+    </aside>
+
+    <section class="center">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="v2d">2D</button>
+        <button class="tab" data-tab="v3d">3D</button>
+        <button class="tab" data-tab="bom">BOM</button>
+        <button class="tab" data-tab="nets">Netlist</button>
+        <button class="tab" data-tab="json">Design JSON</button>
+      </nav>
+      <div class="pane active" id="pane-v2d">
+        <div class="toolbar">
+          <label class="chk"><input type="checkbox" data-layer="top" checked /> <i class="sw" style="background:#c83434"></i>F.Cu</label>
+          <label class="chk"><input type="checkbox" data-layer="bottom" checked /> <i class="sw" style="background:#3a68d8"></i>B.Cu</label>
+          <label class="chk"><input type="checkbox" data-layer="pour" checked /> Pour</label>
+          <label class="chk"><input type="checkbox" data-layer="silk" checked /> <i class="sw" style="background:#eee"></i>Silk</label>
+          <label class="chk"><input type="checkbox" data-layer="courtyard" /> Courtyards</label>
+          <label class="chk"><input type="checkbox" data-layer="ratsnest" checked /> Unrouted</label>
+          <label class="chk"><input type="checkbox" id="flip2d" /> View from bottom</label>
+          <span class="grow"></span>
+          <button class="ghost sm" id="btn-fit">Fit</button>
+          <button class="ghost sm" id="btn-png2d">PNG</button>
+        </div>
+        <div class="canvas-wrap"><canvas id="c2d"></canvas></div>
+        <div class="hoverbar" id="hover">Scroll to zoom · drag to pan · click a pad or track to highlight its net · double-click to fit</div>
+      </div>
+      <div class="pane" id="pane-v3d">
+        <div class="toolbar">
+          <button class="ghost sm" data-view="iso">Iso</button>
+          <button class="ghost sm" data-view="top">Top</button>
+          <button class="ghost sm" data-view="bottom">Bottom</button>
+          <label class="chk"><input type="checkbox" id="show-comps" checked /> Components</label>
+          <span class="grow"></span>
+          <button class="ghost sm" id="btn-png3d">PNG</button>
+        </div>
+        <div class="canvas-wrap" id="c3d"></div>
+      </div>
+      <div class="pane scroll" id="pane-bom"><div id="bom-table"></div></div>
+      <div class="pane scroll" id="pane-nets"><div id="net-table"></div></div>
+      <div class="pane" id="pane-json">
+        <div class="toolbar">
+          <span class="muted">Edit the design directly, then apply. Placement is automatic unless a component has x/y.</span>
+          <span class="grow"></span>
+          <button class="ghost sm" id="btn-json-load">Open .json</button>
+          <button class="primary sm" id="btn-json-apply">Apply</button>
+          <input type="file" id="json-file" accept=".json,application/json" class="hidden" />
+        </div>
+        <textarea id="json-edit" spellcheck="false"></textarea>
+      </div>
+    </section>
+
+    <aside class="right">
+      <section class="card">
+        <div class="h">Board</div>
+        <div id="stats" class="stats muted">No board yet.</div>
+      </section>
+      <section class="card">
+        <div class="h">Export for <span id="fab-name">JLCPCB</span></div>
+        <div class="exports">
+          <button class="primary full" id="dl-gerber" disabled>⬇ Gerber + drill (.zip)</button>
+          <button class="full" id="dl-bom" disabled>⬇ BOM (.csv)</button>
+          <button class="full" id="dl-pnp" disabled>⬇ Pick &amp; place (.csv)</button>
+          <button class="full" id="dl-all" disabled>⬇ Everything (.zip)</button>
+        </div>
+        <ul id="fab-notes" class="notes"></ul>
+        <a id="fab-link" class="link" target="_blank" rel="noopener">Open order page ↗</a>
+      </section>
+      <section class="card grow-card">
+        <div class="h">Design check <span id="drc-count" class="pill"></span></div>
+        <ul id="drc" class="drc"></ul>
+      </section>
+    </aside>
+  </main>
+
+  <dialog id="settings">
+    <form method="dialog" class="settings">
+      <h3>Settings</h3>
+      <label>Anthropic API key
+        <input type="password" id="s-key" placeholder="sk-ant-…" autocomplete="off" />
+      </label>
+      <p class="muted small">The key is stored only in this browser (localStorage) and sent only to api.anthropic.com. Without a key, PCBx2energy uses its built-in offline circuit templates.</p>
+      <label>Model
+        <select id="s-model"></select>
+      </label>
+      <div class="row">
+        <button value="clear" class="ghost" id="s-clear">Forget key</button>
+        <span class="grow"></span>
+        <button value="cancel" class="ghost">Cancel</button>
+        <button value="save" class="primary" id="s-save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
