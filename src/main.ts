@@ -99,11 +99,16 @@ function setStatus(msg: string, kind: 'idle' | 'busy' | 'err' | 'ok' = 'idle') {
   el.className = `status ${kind}`;
 }
 function setProgress(f: number) { $('progress-bar').style.width = `${Math.round(Math.max(0, Math.min(1, f)) * 100)}%`; }
-function log(html: string) {
-  const li = document.createElement('li');
-  li.innerHTML = `<span class="muted">${new Date().toLocaleTimeString()}</span> ${html}`;
-  $('log').prepend(li);
+function say(html: string, who: 'ai' | 'user' | 'sys' = 'ai', cls = '') {
+  const d = document.createElement('div');
+  d.className = `msg ${who} ${cls}`.trim();
+  d.innerHTML = html;
+  const chat = $('chat');
+  chat.append(d);
+  chat.scrollTop = chat.scrollHeight;
 }
+/** Short assistant note in the chat. */
+function log(html: string) { say(html, 'ai'); }
 function setBusy(on: boolean) {
   busy = on;
   for (const id of ['btn-generate', 'btn-reroute', 'btn-json-apply', 'e-add', 'sch-regen']) $<HTMLButtonElement>(id).disabled = on;
@@ -112,12 +117,13 @@ function setBusy(on: boolean) {
 }
 function updateAiMode() {
   const el = $('ai-mode');
-  if (apiKey) { el.textContent = `AI: ${MODELS.find((m) => m.id === model)?.label.split(' (')[0] ?? model}`; el.className = 'pill ok'; }
-  else { el.textContent = 'Offline mode · add API key for full AI'; el.className = 'pill'; }
+  if (apiKey) { el.textContent = `● ${MODELS.find((m) => m.id === model)?.label.split(' (')[0] ?? model}`; el.className = 'pill ok'; }
+  else { el.textContent = 'Demo mode · add Claude key'; el.className = 'pill'; }
+  $('demo-banner').classList.toggle('hidden', !!apiKey);
 }
 
 // ---------------- auth ----------------
-const authMsg = (t: string, kind: 'err' | 'ok' | '' = '') => { const el = $('a-msg'); el.textContent = t; el.className = `msg ${kind}`; };
+const authMsg = (t: string, kind: 'err' | 'ok' | '' = '') => { const el = $('a-msg'); el.textContent = t; el.className = `amsg ${kind}`; };
 document.querySelectorAll<HTMLButtonElement>('[data-atab]').forEach((b) => (b.onclick = () => {
   document.querySelectorAll<HTMLButtonElement>('[data-atab]').forEach((x) => x.classList.toggle('active', x === b));
   $('form-email').classList.toggle('hidden', b.dataset.atab !== 'email');
@@ -205,12 +211,30 @@ async function generate() {
   const prompt = $<HTMLTextAreaElement>('prompt').value.trim();
   if (!prompt) { setStatus('Type a description first.', 'err'); return; }
   const refine = $<HTMLInputElement>('refine').checked && !!design;
+  say(esc(prompt), 'user');
+  $<HTMLTextAreaElement>('prompt').value = '';
   // purely cosmetic request on an existing board: restyle instantly, no re-design needed
   if (design && board && isStyleOnly(prompt)) {
     const st = parseStyle(prompt);
     applyStyle(st);
-    log(`<b>Style:</b> ${esc(prompt)} → ${[st.maskColor && `mask ${st.maskColor}`, st.silkColor && `silk ${st.silkColor}`, st.finish].filter(Boolean).join(', ')}`);
+    say(`🎨 Done — ${[st.maskColor && 'board colour', st.silkColor && 'text colour', st.finish && 'pad finish'].filter(Boolean).join(' and ')} updated. Check the 3D tab!`, 'ai', 'ok');
     setStatus('Board colour updated.', 'ok');
+    return;
+  }
+  // "make it 4 layers": just re-route with a new layer count, no redesign needed
+  const lm = prompt.match(/\b(2|4|6|8|10)[ -]?layers?\b/i);
+  if (design && board && lm && prompt.length < 70 && !/\b(add|remove|replace|connect|esp32|usb|button|led)\b/i.test(prompt)) {
+    settings.layers = +lm[1];
+    localStorage.setItem(LS.settings, JSON.stringify(settings));
+    loadRules();
+    setBusy(true);
+    try {
+      const d: Design = JSON.parse(JSON.stringify(design));
+      freeze(d);
+      d.board.layers = settings.layers;
+      say(`Switching to <b>${settings.layers} layers</b> and re-routing…`);
+      await verifyAndShow(d, false);
+    } catch (e) { setStatus((e as Error).message, 'err'); say(esc((e as Error).message), 'ai', 'err'); } finally { setBusy(false); }
     return;
   }
   setBusy(true);
@@ -219,20 +243,18 @@ async function generate() {
   try {
     let d: Design;
     if (apiKey) {
-      log(`<b>${refine ? 'Modify' : 'Generate'}:</b> ${esc(prompt)}`);
       d = await generateDesign({ apiKey, model, prompt, current: refine ? design : null, signal: abort.signal, onProgress: (m) => setStatus(m, 'busy') });
     } else {
-      if (refine) log('Offline mode cannot modify designs - generating a new one. Add an API key in Settings for AI edits.');
+      if (refine) say('Demo mode can’t edit an existing design, so I’ll build a new one. Add your Claude API key (⚙) to edit boards by chatting.', 'ai', 'err');
       const r = offlineDesign(prompt);
       d = r.design;
-      log(`<b>Offline template:</b> ${esc(r.matched)} (from "${esc(prompt)}")`);
+      say(`Demo mode: I matched your request to my <b>${esc(r.matched)}</b> template. (With a Claude key I can design anything.)`, 'sys');
     }
     if (!refine) { cloudId = undefined; for (const c of d.components) { c.x = null; c.y = null; } }
     // appearance: what the user typed wins over what the AI inferred
     const st = { ...d.style, ...parseStyle(prompt) };
     if (st.maskColor || st.silkColor || st.finish) { applyStyle(st); log(`Board style: ${Object.values(st).filter(Boolean).join(' · ')}`); }
-    log(`Circuit: <b>${esc(d.name)}</b> - ${d.components.length} parts, ${d.nets.length} nets, ${(d.labels ?? []).length} labels`);
-    for (const n of d.notes ?? []) log(`Note: ${esc(n)}`);
+    say(`I designed <b>${esc(d.name)}</b>: ${d.components.length} parts, ${d.nets.length} connections, ${(d.labels ?? []).length} labels.${(d.notes ?? []).length ? `<br><span class="muted">${(d.notes ?? []).map(esc).join('<br>')}</span>` : ''}`);
 
     // --- 3 self-review passes ---
     vstate.running = 'review'; renderVerify();
@@ -241,7 +263,7 @@ async function generate() {
       onProgress: (m) => setStatus(m, 'busy'),
       onPass: (p) => {
         vstate.reviews.push(p); renderVerify(); setProgress(p.pass / REVIEW_PASSES / 2);
-        log(`Review ${p.pass}/${REVIEW_PASSES} (${p.source === 'ai' ? 'AI' : 'rules'}): ${p.errorsBefore} error(s) → ${p.errorsAfter}${p.fixes.length ? ` · ${esc(p.fixes.join('; '))}` : ''}${p.rejected ? ` · <i>${esc(p.rejected)}</i>` : ''}`);
+        setStatus(`Self-review ${p.pass}/${REVIEW_PASSES} done`, 'busy');
       },
     });
     d = rv.design;
@@ -268,15 +290,15 @@ async function verifyAndShow(d: Design, fresh: boolean) {
   const t0 = performance.now();
   const r = await runJob('verify', d, settings, (run) => {
     vstate.drc.push(run); renderVerify();
-    log(`DRC run ${run.run}/${DRC_RUNS}: ${run.errors ? `<span style="color:var(--danger)">${run.errors} issue(s)</span>` : '<b>clean</b>'} · ${run.boardSize} · ${run.ms} ms`);
+    setStatus(`Design check ${run.run}/${DRC_RUNS} done`, 'busy');
   });
   design = d;
   vstate.stale = false; vstate.hasRun = true; vstate.running = '';
   setBoard(r.board, !fresh);
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
   const errs = drc.filter((x) => x.kind !== 'warning').length;
-  if (errs) { setStatus(`Done in ${secs}s - ${errs} DRC issue(s) remain. See Design check.`, 'err'); log(`Finished with <b>${errs}</b> DRC issue(s).`); }
-  else { setStatus(`Done in ${secs}s - ${r.board.layers}-layer board passed ${REVIEW_PASSES} reviews and ${DRC_RUNS} DRC runs. Ready to export.`, 'ok'); log(`Layout: ${r.board.width.toFixed(0)}×${r.board.height.toFixed(0)} mm, ${r.board.tracks.length} tracks, ${r.board.vias.length} vias - <b>verified</b>`); }
+  if (errs) { setStatus(`Done in ${secs}s - ${errs} issue(s) remain. See Health checks.`, 'err'); say(`⚠ The board is built but ${errs} issue(s) remain — see <b>Health checks</b> on the right. Try a bigger board or more layers.`, 'ai', 'err'); }
+  else { setStatus(`Done in ${secs}s - ${r.board.layers}-layer board passed ${REVIEW_PASSES} reviews and ${DRC_RUNS} DRC runs. Ready to export.`, 'ok'); say(`✅ <b>Your board is ready</b> — ${r.board.width.toFixed(0)} × ${r.board.height.toFixed(0)} mm, ${r.board.layers} layers, ${r.board.tracks.length} wires. It passed ${REVIEW_PASSES} self-reviews and ${DRC_RUNS} design checks.<br><span class="muted">Next: spin it in <b>3D</b>, then try <b>Test power &amp; heat</b>.</span>`, 'ai', 'ok'); }
   renderVerify();
 }
 
@@ -309,6 +331,7 @@ function setBoard(b: Board | null, keepView = false) {
   else schem = null;
   renderStats(); renderDrc(); renderBom(); renderNets(); renderSel();
   onBoardChangedForTabs();
+  renderChrome();
   $<HTMLTextAreaElement>('json-edit').value = design ? JSON.stringify(design, null, 2) : '';
   for (const id of ['dl-gerber', 'dl-bom', 'dl-pnp', 'dl-all']) $<HTMLButtonElement>(id).disabled = !b;
   if (b && design) { $<HTMLInputElement>('r-bw').value = String(design.board.width || 0); $<HTMLInputElement>('r-bh').value = String(design.board.height || 0); $<HTMLInputElement>('r-corner').value = String(design.board.cornerRadius ?? 1); }
@@ -320,7 +343,7 @@ function renderLayerToggles() {
   const sel = $<HTMLSelectElement>('active-layer');
   if (!b) { box.innerHTML = ''; sel.innerHTML = ''; return; }
   const NL = b.layers;
-  if (view2d.visibleLayers.length !== NL) view2d.visibleLayers = Array.from({ length: NL }, () => true);
+  if (view2d.visibleLayers.length !== NL) view2d.visibleLayers = Array.from({ length: NL }, (_, l) => l === 0 || l === NL - 1);
   box.innerHTML = Array.from({ length: NL }, (_, l) => `<label class="chk" title="${b.stack[l] === 'S' ? 'signal layer' : b.stack[l] === 'G' ? 'ground plane' : 'power plane'}"><input type="checkbox" data-lyr="${l}" ${view2d.visibleLayers[l] ? 'checked' : ''}/> <i class="sw" style="background:${layerColor(l, NL)}"></i>${layerName(l, NL)}<span class="muted small">${b.stack[l] === 'S' ? '' : b.stack[l]}</span></label>`).join('');
   box.querySelectorAll<HTMLInputElement>('[data-lyr]').forEach((c) => c.addEventListener('change', () => { view2d.visibleLayers[+c.dataset.lyr!] = c.checked; view2d.draw(); }));
   sel.innerHTML = Array.from({ length: NL }, (_, l) => `<option value="${l}">${layerName(l, NL)}</option>`).join('');
@@ -457,6 +480,7 @@ function renderVerify() {
   const verified = vstate.hasRun && !vstate.stale && vstate.reviews.length >= REVIEW_PASSES && okDrc;
   pill.textContent = vstate.running ? 'running…' : vstate.stale ? 'stale' : verified ? 'verified ✓' : vstate.hasRun ? 'issues' : '';
   pill.className = `pill ${vstate.running ? '' : vstate.stale ? '' : verified ? 'ok' : vstate.hasRun ? 'bad' : ''}`;
+  renderCoach();
   if (!vstate.reviews.length && !vstate.drc.length && !vstate.running) { el.innerHTML = '<div class="muted small">AI review ×3 and DRC ×5 run after every generation.</div>'; return; }
   const rows: string[] = [];
   for (let i = 1; i <= REVIEW_PASSES; i++) {
@@ -578,7 +602,7 @@ function renderFab() {
   const a = $<HTMLAnchorElement>('fab-link');
   a.href = f.url;
   a.textContent = `Open ${f.name} order page ↗`;
-  $('dl-pnp').textContent = fab === 'jlcpcb' ? '⬇ CPL / pick & place (.csv)' : fab === 'pcbway' ? '⬇ Centroid file (.csv)' : '⬇ Pick & place (.csv)';
+  $('dl-pnp').textContent = fab === 'jlcpcb' ? '⬇ Part positions (CPL)' : fab === 'pcbway' ? '⬇ Part positions (centroid)' : '⬇ Part positions';
 }
 
 // ---------------- schematic ----------------
@@ -660,7 +684,8 @@ async function exportFile(which: 'gerberZip' | 'bom' | 'pnp' | 'all') {
   if (!ok && errs && !confirm(`DRC still reports ${errs} issue(s). Export anyway?`)) return;
   const pkg = await buildFabPackage(board, fab);
   download(pkg[which]);
-  log(`Exported <b>${esc(pkg[which].name)}</b> for ${FABS[fab].name}`);
+  exported = true; renderCoach();
+  say(`⬇ Downloaded <b>${esc(pkg[which].name)}</b> for ${FABS[fab].name}. Upload it on their website to order.`, 'ai', 'ok');
 }
 
 // ---------------- cloud ----------------
@@ -705,6 +730,9 @@ $('cloud-save').onclick = async () => {
 function activateTab(name: string) {
   document.querySelectorAll<HTMLButtonElement>('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll<HTMLElement>('.pane').forEach((p) => p.classList.toggle('active', p.id === `pane-${name}`));
+  visited.add(name);
+  $('app').classList.toggle('wide', name === 'sim' || name === 'mech');
+  $('empty').classList.toggle('hidden', !!board || name === 'cloud' || name === 'json');
   view3d.setActive(name === 'v3d');
   viewMech.setActive(name === 'mech');
   if (name === 'v3d') refresh3d();
@@ -713,6 +741,7 @@ function activateTab(name: string) {
   if (name === 'v2d') view2d.resize();
   if (name === 'sch') renderSchematic();
   if (name === 'cloud') void refreshCloud();
+  renderCoach();
 }
 
 // ---------------- rules ----------------
@@ -745,11 +774,13 @@ function readRules() {
 }
 
 // ---------------- wiring ----------------
+const DESC: Record<string, string> = { 'LED board': 'Blue LEDs with resistors, powered over USB-C.', '555 blinker': 'The classic blinking-LED timer circuit.', 'ESP32 dev board': 'Wi-Fi/Bluetooth microcontroller board with USB-C.', 'ATmega328P': 'Arduino-compatible board with crystal and ISP header.', '3.3V LDO': 'Voltage regulator breakout with power LED.', 'MOSFET switch': 'Switch a 12 V LED strip from a logic signal.', 'USB-UART': 'USB-C to serial adapter (CH340C).' };
 for (const ex of EXAMPLES) {
   const b = document.createElement('button');
-  b.textContent = ex.label;
+  b.className = 'ex-card';
+  b.innerHTML = `<b>${esc(ex.label)}</b><span>${esc(DESC[ex.label] ?? ex.prompt)}</span>`;
   b.title = ex.prompt;
-  b.onclick = () => { $<HTMLTextAreaElement>('prompt').value = ex.prompt; $<HTMLInputElement>('refine').checked = false; };
+  b.onclick = () => { $<HTMLTextAreaElement>('prompt').value = ex.prompt; $<HTMLInputElement>('refine').checked = false; void generate(); };
   $('examples').append(b);
 }
 $<HTMLSelectElement>('e-fp').innerHTML = FOOTPRINT_IDS.map((f) => `<option>${f}</option>`).join('');
@@ -1061,6 +1092,84 @@ viewMech.onPick = (ref) => { selected = ref; view2d.selected = ref; renderSel();
 viewMech.onDrag = (ref, x, y) => { void edit((d) => { const c = d.components.find((q) => q.ref === ref); if (c) { c.x = x; c.y = y; } }, `Moving ${ref}…`); };
 document.querySelectorAll<HTMLButtonElement>('[data-mview]').forEach((b) => (b.onclick = () => viewMech.view(b.dataset.mview as 'iso' | 'top' | 'front' | 'side')));
 
+// ================= app chrome: coach, suggestions, empty state, modals =================
+const visited = new Set<string>(['v2d']);
+let exported = false;
+
+function openExport() { if (!board) { setStatus('Create a board first.', 'err'); $('prompt').focus(); return; } $<HTMLDialogElement>('export').showModal(); }
+function greet() {
+  if ($('chat').children.length) return;
+  say(`Hi! I’m your PCB copilot. <b>Tell me what you want to build</b> and I’ll design it, wire it up and check it for you.<br><span class="muted">Try “ESP32 board with USB-C power and a reset button”, or pick an example in the middle of the screen.</span>`);
+}
+function renderCoach() {
+  const el = $('coach');
+  const built = !!board;
+  const checked = built && vstate.hasRun && !vstate.stale && vstate.drc.length === DRC_RUNS && vstate.drc.every((r) => r.errors === 0);
+  type Step = { id: string; label: string; hint: string; done: boolean; optional?: boolean; go: () => void };
+  const steps: Step[] = [
+    { id: 'describe', label: 'Describe your board', hint: 'Type it in the Copilot box', done: built, go: () => $('prompt').focus() },
+    { id: 'check', label: 'AI builds & checks it', hint: checked ? 'Self-review ×3 and design check ×5 passed' : 'Waiting for checks', done: checked, go: () => { if (board) void reverify(); } },
+    { id: '3d', label: 'Look at it in 3D', hint: 'Spin it, hover the parts', done: visited.has('v3d'), go: () => activateTab('v3d') },
+    { id: 'sim', label: 'Test power & heat', hint: 'See what gets hot or burns out', done: visited.has('sim'), go: () => activateTab('sim') },
+    { id: 'mech', label: 'Check it fits your case', hint: 'Optional — import a STEP/STL case', done: visited.has('mech'), optional: true, go: () => activateTab('mech') },
+    { id: 'export', label: 'Export & order', hint: 'Pick a factory and download files', done: exported, go: openExport },
+  ];
+  const next = steps.find((x) => !x.done && !x.optional);
+  el.innerHTML = `<ul class="coach">${steps.map((x) => `<li class="${x.done ? 'done' : x === next ? 'next' : ''}" data-id="${x.id}"><span class="dot">${x.done ? '✓' : ''}</span><span>${esc(x.label)}${x.optional ? ' <span class="muted">(optional)</span>' : ''}<small>${esc(x.hint)}</small></span></li>`).join('')}</ul>`;
+  el.querySelectorAll<HTMLElement>('li').forEach((li) => (li.onclick = () => steps.find((x) => x.id === li.dataset.id)!.go()));
+}
+function renderSuggest() {
+  const el = $('chat-suggest');
+  const ideas = !board ? [] : apiKey
+    ? ['Make the PCB matte black', 'Make it 4 layers', 'Add a reset button', 'Add labels to the headers', 'Make the board smaller', 'Use gold finish and white text']
+    : ['Make the PCB matte black', 'Make it 4 layers', 'Make the board purple with white text'];
+  el.innerHTML = ideas.map((t) => `<button data-t="${esc(t)}">${esc(t)}</button>`).join('');
+  el.querySelectorAll<HTMLButtonElement>('button').forEach((b) => (b.onclick = () => { $<HTMLTextAreaElement>('prompt').value = b.dataset.t!; $<HTMLInputElement>('refine').checked = true; void generate(); }));
+}
+function renderChrome() {
+  $('empty').classList.toggle('hidden', !!board || ['pane-cloud', 'pane-json'].some((id) => $(id).classList.contains('active')));
+  if (design) { const pn = $<HTMLInputElement>('proj-name'); if (document.activeElement !== pn) pn.value = design.name; }
+  renderCoach();
+  renderSuggest();
+}
+$('proj-name').addEventListener('change', () => {
+  const v = $<HTMLInputElement>('proj-name').value.trim() || 'Untitled board';
+  if (design) design.name = v;
+  if (board) { board.design.name = v; silk = buildSilk(board); view2d.silk = silk; view2d.draw(); view3dDirty = true; if (design) localStorage.setItem(LS.design, JSON.stringify(design)); }
+});
+function newBoard() {
+  if (busy) return;
+  if (board && !confirm('Start a new board? Your current one will be cleared (save it to My designs first if you want to keep it).')) return;
+  design = null; board = null; cloudId = undefined; selected = null; simSources = []; simResult = null; exported = false;
+  vstate.reviews = []; vstate.drc = []; vstate.hasRun = false; vstate.stale = false; vstate.running = '';
+  mech.fit = null;
+  localStorage.removeItem(LS.design);
+  setBoard(null);
+  renderVerify();
+  say('Fresh start — what would you like to build?');
+  $('prompt').focus();
+}
+$('btn-newchat').onclick = newBoard;
+$('btn-export').onclick = openExport;
+$('btn-export2').onclick = openExport;
+$('banner-key').onclick = () => $('btn-settings').click();
+$('btn-help').onclick = () => $<HTMLDialogElement>('help').showModal();
+document.querySelectorAll<HTMLButtonElement>('[data-close]').forEach((b) => (b.onclick = () => (b.closest('dialog') as HTMLDialogElement).close()));
+document.querySelectorAll<HTMLDialogElement>('dialog.modal').forEach((d) => d.addEventListener('click', (e) => { if (e.target === d) d.close(); }));
+$('empty-go').onclick = () => { const v = $<HTMLTextAreaElement>('empty-prompt').value.trim(); if (!v) { $('empty-prompt').focus(); return; } $<HTMLTextAreaElement>('prompt').value = v; $<HTMLInputElement>('refine').checked = false; $<HTMLTextAreaElement>('empty-prompt').value = ''; void generate(); };
+$('empty-prompt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('empty-go').click(); } });
+function applyMode(m: 'beginner' | 'pro') { document.documentElement.setAttribute('data-mode', m); localStorage.setItem('pcbx2.mode', m); $('btn-mode').textContent = m === 'pro' ? 'Pro' : 'Beginner'; }
+$('btn-mode').onclick = () => { const next = document.documentElement.getAttribute('data-mode') === 'pro' ? 'beginner' : 'pro'; applyMode(next); say(next === 'pro' ? 'Pro mode on: advanced rules, the Advanced data tab and extra view options are now visible.' : 'Beginner mode on: advanced controls are hidden to keep things simple.', 'sys'); };
+applyMode((localStorage.getItem('pcbx2.mode') as 'beginner' | 'pro') || 'beginner');
+$('tgl-right').onclick = () => {
+  const ins = document.querySelector('.inspector')!;
+  if (window.innerWidth <= 1280) ins.classList.toggle('show'); else $('app').classList.toggle('no-right');
+  window.setTimeout(() => { view2d.resize(); simView.resize(); view3d.resize(); viewMech.resize(); }, 220);
+};
+$('z-in').onclick = () => view2d.zoomBy(1.3);
+$('z-out').onclick = () => view2d.zoomBy(1 / 1.3);
+$('prompt').addEventListener('input', () => { const t = $<HTMLTextAreaElement>('prompt'); t.style.height = 'auto'; t.style.height = `${Math.min(160, t.scrollHeight)}px`; });
+
 // ---------------- boot ----------------
 loadRules();
 renderFab();
@@ -1074,9 +1183,10 @@ function bootApp() {
     try {
       const d = JSON.parse(saved) as Design;
       setBusy(true);
-      relayout(d, 'Restoring your last design…').then(() => { vstate.stale = false; vstate.hasRun = false; renderVerify(); log('Restored your last design (press “Re-run 5× DRC” or export to verify).'); }).catch(() => undefined).finally(() => setBusy(false));
+      relayout(d, 'Restoring your last design…').then(() => { vstate.stale = false; vstate.hasRun = false; renderVerify(); say(`Welcome back! I restored <b>${esc(d.name)}</b>.`); renderChrome(); }).catch(() => undefined).finally(() => setBusy(false));
       return;
     } catch { /* ignore */ }
   }
-  $<HTMLTextAreaElement>('prompt').value = EXAMPLES[2].prompt;
+  greet();
+  if (!localStorage.getItem('pcbx2.welcomed')) { localStorage.setItem('pcbx2.welcomed', '1'); $<HTMLDialogElement>('welcome').showModal(); }
 }

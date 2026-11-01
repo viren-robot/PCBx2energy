@@ -1,304 +1,376 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" data-mode="beginner">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PCBx2energy — Text to PCB</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231f7a3a'/><path d='M8 10h8v6h8' stroke='%23e3b341' stroke-width='3' fill='none'/><circle cx='8' cy='10' r='3' fill='%23ddd'/><circle cx='24' cy='16' r='3' fill='%23ddd'/><circle cx='12' cy='23' r='3' fill='%23ddd'/></svg>" />
+  <title>PCBx2energy — Design circuit boards by describing them</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%237c5cff'/><path d='M8 10h8v6h8' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/><circle cx='8' cy='10' r='3' fill='white'/><circle cx='24' cy='16' r='3' fill='white'/><circle cx='12' cy='23' r='3' fill='white'/></svg>" />
   <script>
     (function () {
       var t = localStorage.getItem('pcbx2.theme');
       if (!t) t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', t);
+      document.documentElement.setAttribute('data-mode', localStorage.getItem('pcbx2.mode') || 'beginner');
     })();
   </script>
 </head>
 <body>
-  <!-- ============ login ============ -->
+  <!-- ================= sign in ================= -->
   <div id="auth" class="auth">
     <div class="auth-card">
-      <h1><span class="logo">⚡</span> PCBx2energy</h1>
-      <p>Sign in to design PCBs from text.</p>
-      <div class="auth-tabs">
-        <button class="active" data-atab="email">Email link</button>
+      <div class="auth-logo"><span class="logo-mark"></span>PCBx2energy</div>
+      <h1>Design circuit boards by describing them</h1>
+      <p>Type what you want. The AI designs, wires, checks and prepares it for manufacturing.</p>
+      <div class="seg-tabs">
+        <button class="active" data-atab="email">Email me a link</button>
         <button data-atab="admin">Admin</button>
       </div>
       <form id="form-email" class="auth-form">
-        <label>Your email (Gmail works)
+        <label>Your email <span class="muted">(Gmail works)</span>
           <input type="email" id="a-email" placeholder="you@gmail.com" autocomplete="email" required />
         </label>
-        <button class="primary" type="submit" id="a-send">Send me a sign-in link</button>
-        <div class="muted small">We email you a one-time link. Click it and you are signed in — no password.</div>
+        <button class="primary lg" type="submit" id="a-send">Send me a sign-in link</button>
+        <div class="muted small">No password needed — click the link in your email and you’re in.</div>
       </form>
       <form id="form-admin" class="auth-form hidden">
         <label>Admin username <span class="muted">(not case sensitive)</span>
-          <input type="text" id="a-user" placeholder="stellarx1" autocomplete="username" autocapitalize="off" spellcheck="false" required />
+          <input type="text" id="a-user" placeholder="username" autocomplete="username" autocapitalize="off" spellcheck="false" required />
         </label>
         <label>Password
           <input type="password" id="a-pass" autocomplete="current-password" required />
         </label>
-        <button class="primary" type="submit" id="a-login">Admin sign in</button>
+        <button class="primary lg" type="submit" id="a-login">Sign in</button>
       </form>
-      <div id="a-msg" class="msg"></div>
-      <div style="display:flex;justify-content:flex-end"><button class="ghost sm" id="a-theme" type="button">◐ Theme</button></div>
+      <div id="a-msg" class="amsg"></div>
+      <div class="auth-foot"><button class="ghost sm" id="a-theme" type="button">◐ Light / dark</button></div>
     </div>
   </div>
 
+  <!-- ================= top bar ================= -->
   <header class="topbar">
-    <div class="brand"><span class="logo">⚡</span> PCBx2energy <span class="tag">Text → PCB</span></div>
-    <div class="fab-picker" role="radiogroup" aria-label="Fabrication house">
-      <span class="lbl">Fab:</span>
-      <button data-fab="jlcpcb" class="seg active">JLCPCB</button>
-      <button data-fab="pcbway" class="seg">PCBWay</button>
-      <button data-fab="oshpark" class="seg">OSH Park</button>
-    </div>
-    <div class="top-actions">
-      <span id="ai-mode" class="pill"></span>
-      <button id="btn-theme" class="ghost" title="Toggle dark / light mode">◐</button>
-      <button id="btn-settings" class="ghost" title="Settings">⚙</button>
-      <span class="user-chip"><span id="user-name" class="muted"></span><span id="admin-badge" class="badge hidden">admin</span><button id="btn-logout" class="ghost sm">Sign out</button></span>
-    </div>
+    <div class="brand"><span class="logo-mark"></span><span class="brand-name">PCBx2energy</span></div>
+    <input id="proj-name" class="proj-name" value="Untitled board" spellcheck="false" aria-label="Board name" title="Rename your board" />
+    <span class="grow"></span>
+    <span id="ai-mode" class="pill" title="Click to add or change your Claude API key"></span>
+    <button id="btn-mode" class="ghost sm" title="Beginner mode hides advanced controls. Switch to Pro for full control.">Beginner</button>
+    <button id="btn-help" class="icon" title="Help &amp; glossary">?</button>
+    <button id="btn-theme" class="icon" title="Switch dark / light mode"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 010 17z" fill="currentColor"/></svg></button>
+    <button id="btn-settings" class="icon" title="Settings (Claude API key, model)">⚙</button>
+    <span class="user-chip"><span id="user-name" class="muted"></span><span id="admin-badge" class="badge hidden">admin</span><button id="btn-logout" class="ghost sm">Sign out</button></span>
+    <button id="btn-export" class="primary">Export &amp; order</button>
   </header>
 
-  <main class="layout">
-    <aside class="left">
-      <section class="card">
-        <label class="h" for="prompt">Describe your board</label>
-        <textarea id="prompt" rows="5" placeholder="e.g. ESP32 board with USB-C power, 3.3V regulator, BME280 on I2C, status LED, 4 mounting holes, matte black PCB with gold finish"></textarea>
-        <div class="row">
-          <label class="chk"><input type="checkbox" id="refine" /> Modify current design</label>
-          <span class="grow"></span>
-          <button id="btn-cancel" class="ghost hidden">Cancel</button>
-          <button id="btn-generate" class="primary">Generate PCB</button>
-        </div>
-        <div class="muted small" style="margin-top:8px">AI designs, labels, routes and colours the board, then reviews its own work 3× and runs DRC 5× before you export. You can edit everything afterwards.</div>
-        <div class="examples" id="examples"></div>
-      </section>
-
-      <section class="card">
-        <div class="h">Activity</div>
+  <main id="app" class="app">
+    <!-- ================= copilot ================= -->
+    <aside class="copilot">
+      <div class="cp-head">
+        <div class="cp-title"><span class="spark">✦</span> Copilot</div>
+        <span class="grow"></span>
+        <button id="btn-newchat" class="ghost sm" title="Start a new board">+ New board</button>
+      </div>
+      <div id="chat" class="chat"></div>
+      <div id="demo-banner" class="banner hidden">
+        <b>Demo mode.</b> Add your Claude API key to unlock the full AI (any circuit, edits, self-review).
+        <button class="link-btn" id="banner-key">Add key</button>
+      </div>
+      <div id="chat-suggest" class="suggest"></div>
+      <div class="status-line">
         <div id="status" class="status idle">Ready.</div>
         <div class="progress"><div id="progress-bar"></div></div>
-        <ul id="log" class="log"></ul>
-      </section>
-
-      <details class="card" id="rules">
-        <summary class="h">Board &amp; design rules</summary>
-        <div class="grid2">
-          <label>Board W × H (mm, 0 = auto)<span class="pair"><input type="number" step="1" min="0" id="r-bw" /><input type="number" step="1" min="0" id="r-bh" /></span></label>
-          <label>Corner radius (mm)<input type="number" step="0.5" min="0" id="r-corner" /></label>
-          <label>Copper layers<select id="r-layers"><option value="0">Auto (AI decides)</option><option value="2">2</option><option value="4">4</option><option value="6">6</option><option value="8">8</option><option value="10">10</option></select></label>
-          <label>Signal track (mm)<input type="number" step="0.05" min="0.1" id="r-track" /></label>
-          <label>Power track (mm)<input type="number" step="0.05" min="0.1" id="r-power" /></label>
-          <label>Clearance (mm)<input type="number" step="0.05" min="0.1" id="r-clear" /></label>
-          <label>Via Ø / drill (mm)<span class="pair"><input type="number" step="0.05" id="r-via" /><input type="number" step="0.05" id="r-drill" /></span></label>
-          <label>Board thickness<select id="r-thick"><option>0.8</option><option>1.0</option><option>1.2</option><option selected>1.6</option><option>2.0</option></select></label>
-          <label>Surface finish<select id="r-finish"><option>HASL</option><option>ENIG</option></select></label>
-          <label>Solder mask<span class="row-inline"><select id="r-mask">
-            <option value="#1f7a3a">Green</option><option value="#5b2a86">Purple</option><option value="#141414">Black</option>
-            <option value="#1d4f9c">Blue</option><option value="#b3202a">Red</option><option value="#f2f2ee">White</option><option value="#d9b320">Yellow</option>
-          </select><input type="color" id="r-maskc" title="Custom mask colour" /></span></label>
-          <label>Silkscreen<span class="row-inline"><select id="r-silk"><option value="#ffffff">White</option><option value="#141414">Black</option><option value="#f0e442">Yellow</option></select><input type="color" id="r-silkc" title="Custom silk colour" /></span></label>
-          <label class="chk"><input type="checkbox" id="r-pour" /> GND pour (bottom)</label>
+      </div>
+      <div class="composer">
+        <textarea id="prompt" rows="2" placeholder="Describe your board… e.g. “ESP32 board with USB-C power and 2 buttons”"></textarea>
+        <div class="comp-row">
+          <label class="switch" title="Change the current board instead of starting over"><input type="checkbox" id="refine" /><span class="knob"></span> Edit current board</label>
+          <span class="grow"></span>
+          <button id="btn-cancel" class="ghost sm hidden">Stop</button>
+          <button id="btn-generate" class="send" title="Create board (Ctrl+Enter)">Create <span class="arrow">↑</span></button>
         </div>
-        <button id="btn-reroute" class="ghost full">Apply &amp; re-route</button>
-        <div class="muted small" style="margin-top:6px">Colours apply instantly. Tip: just type “make the PCB matte black” and press Generate.</div>
-      </details>
+      </div>
     </aside>
 
-    <section class="center">
-      <nav class="tabs" role="tablist">
-        <button class="tab active" data-tab="v2d">2D</button>
-        <button class="tab" data-tab="v3d">3D</button>
-        <button class="tab" data-tab="sch">Schematic</button>
-        <button class="tab" data-tab="sim">Simulation</button>
-        <button class="tab" data-tab="mech">Mechanic</button>
-        <button class="tab" data-tab="bom">BOM</button>
-        <button class="tab" data-tab="nets">Netlist</button>
-        <button class="tab" data-tab="json">Design JSON</button>
-        <button class="tab" data-tab="cloud">Cloud</button>
+    <!-- ================= workspace ================= -->
+    <section class="workspace">
+      <nav class="viewbar" role="tablist">
+        <button class="tab active" data-tab="v2d" title="The board layout: parts and copper traces"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 9h5v6h5"/></svg>PCB</button>
+        <button class="tab" data-tab="v3d" title="Realistic 3D view you can rotate"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>3D</button>
+        <button class="tab" data-tab="sch" title="Circuit diagram generated from your board"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg>Schematic</button>
+        <button class="tab" data-tab="sim" title="Apply power and see voltages, heat and what might burn out"><svg viewBox="0 0 24 24"><path d="M13 2L5 14h6l-1 8 8-12h-6z"/></svg>Test power &amp; heat</button>
+        <button class="tab" data-tab="mech" title="Import a case or bracket (STEP / STL) and check your board fits"><svg viewBox="0 0 24 24"><path d="M4 8l8-4 8 4v8l-8 4-8-4z"/><path d="M4 8l8 4 8-4"/></svg>Case fit</button>
+        <button class="tab" data-tab="bom" title="Every part on the board, ready to buy"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Parts list</button>
+        <button class="tab" data-tab="nets" title="Which pins are wired together (edit connections)"><svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.5 11l7-4M8.5 13l7 4"/></svg>Connections</button>
+        <button class="tab pro-only" data-tab="json" title="The raw design data (advanced)"><svg viewBox="0 0 24 24"><path d="M8 8l-5 4 5 4M16 8l5 4-5 4M14 5l-4 14"/></svg>Advanced</button>
+        <button class="tab" data-tab="cloud" title="Your saved designs"><svg viewBox="0 0 24 24"><path d="M7 18a4 4 0 010-8 5 5 0 019.6-1A4.5 4.5 0 0117 18z"/></svg>My designs</button>
+        <span class="grow"></span>
+        <button id="tgl-right" class="icon" title="Show / hide the side panel">▥</button>
       </nav>
 
-      <div class="pane active" id="pane-v2d">
-        <div class="toolbar">
-          <span id="layer-toggles" class="row-inline"></span>
-          <label class="chk">Active <select id="active-layer" style="width:auto;padding:2px 6px"></select></label>
-          <label class="chk"><input type="checkbox" data-layer="pour" checked /> Pour</label>
-          <label class="chk"><input type="checkbox" data-layer="silk" checked /> <i class="sw" style="background:#eee"></i>Silk</label>
-          <label class="chk"><input type="checkbox" data-layer="courtyard" /> Courtyards</label>
-          <label class="chk"><input type="checkbox" data-layer="ratsnest" checked /> Unrouted</label>
-          <label class="chk"><input type="checkbox" id="flip2d" /> View from bottom</label>
-          <span class="grow"></span>
-          <button class="ghost sm" id="btn-fit">Fit</button>
-          <button class="ghost sm" id="btn-png2d">PNG</button>
-        </div>
-        <div class="editbar">
-          <b>Edit</b>
-          <span class="sel" id="sel-info">Drag a part to move it · click to select</span>
-          <button class="ghost sm" id="e-rot" disabled>Rotate (R)</button>
-          <button class="ghost sm" id="e-del" disabled>Delete (Del)</button>
-          <span class="grow"></span>
-          <select id="e-fp"></select>
-          <input type="text" id="e-val" placeholder="value" size="8" />
-          <button class="ghost sm" id="e-add">+ Add part</button>
-        </div>
-        <div class="canvas-wrap"><canvas id="c2d"></canvas></div>
-        <div class="hoverbar" id="hover">Scroll to zoom · drag empty space to pan · drag a part to move it (traces re-route automatically) · click a pad to highlight its net · double-click to fit</div>
-      </div>
-
-      <div class="pane" id="pane-v3d">
-        <div class="toolbar">
-          <button class="ghost sm" data-view="iso">Iso</button>
-          <button class="ghost sm" data-view="top">Top</button>
-          <button class="ghost sm" data-view="bottom">Bottom</button>
-          <label class="chk"><input type="checkbox" id="show-comps" checked /> Components</label>
-          <label class="chk"><input type="checkbox" id="xray" /> X-ray copper</label>
-          <label class="chk"><input type="checkbox" id="autorot" /> Auto-rotate</label>
-          <span class="muted small">Hover a part for details · click to select it</span>
-          <span class="grow"></span>
-          <button class="ghost sm" id="btn-png3d">PNG</button>
-        </div>
-        <div class="canvas-wrap" id="c3d"></div>
-      </div>
-
-      <div class="pane" id="pane-sch">
-        <div class="toolbar">
-          <button class="ghost sm" id="sch-regen">↻ Regenerate from PCB</button>
-          <button class="ghost sm" id="sch-fit">Fit</button>
-          <button class="ghost sm" id="sch-dl">⬇ SVG</button>
-          <span class="muted small" id="sch-info">Schematic is generated from the board — click a net label to highlight the net.</span>
-        </div>
-        <div class="sch-wrap" id="sch-wrap"></div>
-      </div>
-
-      <div class="pane" id="pane-sim">
-        <div class="sim-grid">
-          <div class="sim-ctl">
-            <div class="h">Power sources <span class="muted small">0 V reference = GND</span></div>
-            <div id="sim-sources"></div>
-            <datalist id="sim-targets"></datalist>
-            <div class="row-inline" style="margin:8px 0">
-              <button class="ghost sm" id="sim-add">+ Add source</button>
-              <select id="sim-preset" style="width:auto"><option value="">Preset…</option><option value="usb">USB 5 V / 0.5 A</option><option value="usb3">USB-C 5 V / 3 A</option><option value="lipo">LiPo 3.7 V / 2 A</option><option value="9">9 V / 1 A</option><option value="12">12 V / 2 A</option><option value="24">24 V / 5 A</option></select>
+      <div class="stage">
+        <!-- empty state -->
+        <div id="empty" class="empty">
+          <div class="empty-inner">
+            <h2>What do you want to build?</h2>
+            <p>Describe it in plain English. The AI will pick the parts, wire them, lay out the board, run safety checks and prepare the files for a factory.</p>
+            <div class="empty-prompt">
+              <textarea id="empty-prompt" rows="2" placeholder="e.g. A small ESP32 board powered over USB-C with a reset button and a status LED"></textarea>
+              <button id="empty-go" class="primary lg">Create board</button>
             </div>
-            <div class="h" style="margin-top:14px">Environment</div>
-            <label class="rng">Ambient temperature <b><output id="sim-amb-v">25</output> °C</b><input type="range" id="sim-amb" min="-20" max="85" step="1" value="25" /></label>
-            <label class="chk"><input type="checkbox" id="sim-cascade" checked /> Let failures cascade (burnt parts open/short)</label>
-            <label class="chk"><input type="checkbox" id="sim-3dov" checked /> Show heat &amp; failures in the 3D tab</label>
-            <div id="sim-sw"></div>
-            <div class="row"><button class="primary" id="sim-run">Run simulation</button><button class="ghost" id="sim-3d">View in 3D</button></div>
-            <div class="muted small" style="margin-top:10px">DC steady-state estimate using typical datasheet values: component power/temperature, regulator dissipation, trace heating (IPC-2221), board heat spreading. It re-runs live as you move the sliders.</div>
+            <div class="empty-label">…or start from an example</div>
+            <div id="examples" class="ex-grid"></div>
           </div>
-          <div class="sim-view">
-            <div class="toolbar">
-              <label class="chk">Overlay <select id="sim-overlay" style="width:auto;padding:2px 6px"><option value="temp">Temperature</option><option value="volt">Net voltage</option></select></label>
-              <span id="sim-pills" class="row-inline"></span>
-            </div>
-            <div class="canvas-wrap"><canvas id="c-sim"></canvas></div>
-            <div class="hoverbar" id="sim-hover">Hover the board for temperatures · click a part to highlight it in the table</div>
-          </div>
-          <div class="sim-res"><div id="sim-events"></div><div id="sim-table"></div><div id="sim-nets"></div></div>
         </div>
-      </div>
 
-      <div class="pane" id="pane-mech">
-        <div class="mech-grid">
-          <div class="mech-ctl">
-            <div class="h">Mechanical models</div>
-            <input type="file" id="m-file" accept=".step,.stp,.stl,.obj" multiple class="hidden" />
-            <button class="primary full" id="m-import">⬆ Import STEP / STL / OBJ</button>
-            <div class="muted small" style="margin:6px 0">Case, holder, bracket… STEP files carry their units. STL/OBJ have none: set the scale (inch → 25.4, cm → 10, m → 1000).</div>
-            <div id="m-list"></div>
-            <div id="m-xform" class="hidden">
-              <div class="grid2">
-                <label>X (mm)<input type="number" step="0.5" id="m-x" /></label><label>Y (mm)<input type="number" step="0.5" id="m-y" /></label>
-                <label>Z (mm)<input type="number" step="0.5" id="m-z" /></label><label>Scale<input type="number" step="0.001" id="m-s" /></label>
-                <label>Rot X°<input type="number" step="90" id="m-rx" /></label><label>Rot Y°<input type="number" step="90" id="m-ry" /></label>
-                <label>Rot Z°<input type="number" step="90" id="m-rz" /></label>
+        <div class="pane active" id="pane-v2d">
+          <div class="toolbar">
+            <span id="layer-toggles" class="row-inline"></span>
+            <label class="chk pro-only">Active layer <select id="active-layer" style="width:auto;padding:2px 6px"></select></label>
+            <label class="chk"><input type="checkbox" data-layer="pour" checked /> Copper fill</label>
+            <label class="chk"><input type="checkbox" data-layer="silk" checked /> Labels</label>
+            <label class="chk pro-only"><input type="checkbox" data-layer="courtyard" /> Part outlines</label>
+            <label class="chk pro-only"><input type="checkbox" data-layer="ratsnest" checked /> Unrouted</label>
+            <label class="chk"><input type="checkbox" id="flip2d" /> Flip board</label>
+            <span class="grow"></span>
+            <button class="ghost sm" id="btn-png2d">Save image</button>
+          </div>
+          <div class="editbar">
+            <span class="sel" id="sel-info">Drag a part to move it · click to select</span>
+            <button class="ghost sm" id="e-rot" disabled>Rotate (R)</button>
+            <button class="ghost sm" id="e-del" disabled>Delete</button>
+            <span class="grow"></span>
+            <span class="row-inline pro-only"><select id="e-fp"></select><input type="text" id="e-val" placeholder="value" size="8" /><button class="ghost sm" id="e-add">+ Add part</button></span>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="c2d"></canvas>
+            <div class="zoom"><button id="z-in" title="Zoom in">+</button><button id="z-out" title="Zoom out">−</button><button id="btn-fit" title="Fit to screen">⤢</button></div>
+          </div>
+          <div class="hoverbar" id="hover">Scroll to zoom · drag empty space to pan · drag a part to move it (wires re-route automatically) · click a pad to highlight its connections</div>
+        </div>
+
+        <div class="pane" id="pane-v3d">
+          <div class="toolbar">
+            <button class="ghost sm" data-view="iso">Angle</button>
+            <button class="ghost sm" data-view="top">Top</button>
+            <button class="ghost sm" data-view="bottom">Bottom</button>
+            <label class="chk"><input type="checkbox" id="show-comps" checked /> Parts</label>
+            <label class="chk"><input type="checkbox" id="xray" /> See-through (copper layers)</label>
+            <label class="chk"><input type="checkbox" id="autorot" /> Spin</label>
+            <span class="muted small">Hover a part for details</span>
+            <span class="grow"></span>
+            <button class="ghost sm" id="btn-png3d">Save image</button>
+          </div>
+          <div class="canvas-wrap" id="c3d"></div>
+        </div>
+
+        <div class="pane" id="pane-sch">
+          <div class="toolbar">
+            <button class="ghost sm" id="sch-regen">↻ Refresh from board</button>
+            <button class="ghost sm" id="sch-fit">Fit</button>
+            <button class="ghost sm" id="sch-dl">Download SVG</button>
+            <span class="muted small" id="sch-info">The schematic is drawn from your board. Click a net label to highlight everything connected to it.</span>
+          </div>
+          <div class="sch-wrap" id="sch-wrap"></div>
+        </div>
+
+        <div class="pane" id="pane-sim">
+          <div class="sim-grid">
+            <div class="sim-ctl">
+              <div class="h">1 · Power it up <span class="muted small">(0 V = GND)</span></div>
+              <div id="sim-sources"></div>
+              <datalist id="sim-targets"></datalist>
+              <div class="row-inline" style="margin:8px 0">
+                <button class="ghost sm" id="sim-add">+ Add power source</button>
+                <select id="sim-preset" style="width:auto"><option value="">Quick presets…</option><option value="usb">USB 5 V / 0.5 A</option><option value="usb3">USB-C 5 V / 3 A</option><option value="lipo">LiPo battery 3.7 V</option><option value="9">9 V / 1 A</option><option value="12">12 V / 2 A</option><option value="24">24 V / 5 A</option></select>
               </div>
-              <div class="row-inline" style="flex-wrap:wrap">
-                <button class="ghost sm" id="m-center">Center on PCB</button>
-                <button class="ghost sm" id="m-floor">Floor under PCB</button>
-                <button class="ghost sm" id="m-reset">Reset</button>
+              <div class="h" style="margin-top:14px">2 · Conditions</div>
+              <label class="rng">Room temperature <b><output id="sim-amb-v">25</output> °C</b><input type="range" id="sim-amb" min="-20" max="85" step="1" value="25" /></label>
+              <label class="chk"><input type="checkbox" id="sim-cascade" checked /> Let burnt parts break the circuit</label>
+              <label class="chk"><input type="checkbox" id="sim-3dov" checked /> Show heat in the 3D view</label>
+              <div id="sim-sw"></div>
+              <div class="row"><button class="primary" id="sim-run">Run test</button><button class="ghost" id="sim-3d">See it in 3D</button></div>
+              <div class="hint">Try this: raise the voltage slider and watch the parts turn red. Estimates use typical datasheet values.</div>
+            </div>
+            <div class="sim-view">
+              <div class="toolbar">
+                <label class="chk">Show <select id="sim-overlay" style="width:auto;padding:2px 6px"><option value="temp">Temperature</option><option value="volt">Voltage</option></select></label>
+                <span id="sim-pills" class="row-inline"></span>
               </div>
-              <label class="chk" style="margin-top:6px"><input type="checkbox" id="m-solid" checked /> Solid (parts must not intersect it)</label>
+              <div class="canvas-wrap"><canvas id="c-sim"></canvas></div>
+              <div class="hoverbar" id="sim-hover">Hover the board for temperatures · click a part to highlight it in the list</div>
             </div>
-            <div class="h" style="margin-top:14px">Fit check</div>
-            <label>Clearance margin (mm)<input type="number" id="m-margin" value="0.3" step="0.1" min="0" /></label>
-            <label class="chk"><input type="checkbox" id="m-live" checked /> Re-check after every change</label>
-            <div class="row"><button class="primary" id="m-check">Check fit</button><button id="m-auto">Auto-move parts</button></div>
-            <div id="m-result"></div>
-          </div>
-          <div class="mech-view">
-            <div class="toolbar">
-              <button class="ghost sm" data-mview="iso">Iso</button><button class="ghost sm" data-mview="top">Top</button><button class="ghost sm" data-mview="front">Front</button><button class="ghost sm" data-mview="side">Side</button>
-              <label class="chk"><input type="checkbox" id="m-ghost" checked /> Translucent models</label>
-              <span class="muted small">Drag any component on the board to move it - traces re-route automatically</span>
-            </div>
-            <div class="canvas-wrap" id="c-mech"></div>
+            <div class="sim-res"><div id="sim-events"></div><div id="sim-table"></div><div id="sim-nets"></div></div>
           </div>
         </div>
-      </div>
 
-      <div class="pane scroll" id="pane-bom"><div id="bom-table"></div></div>
-      <div class="pane scroll" id="pane-nets"><div id="net-table"></div></div>
-      <div class="pane" id="pane-json">
-        <div class="toolbar">
-          <span class="muted">Edit the design directly, then apply. Placement is automatic unless a component has x/y.</span>
-          <span class="grow"></span>
-          <button class="ghost sm" id="btn-json-load">Open .json</button>
-          <button class="primary sm" id="btn-json-apply">Apply</button>
-          <input type="file" id="json-file" accept=".json,application/json" class="hidden" />
+        <div class="pane" id="pane-mech">
+          <div class="mech-grid">
+            <div class="mech-ctl">
+              <div class="h">Case, holder or bracket</div>
+              <input type="file" id="m-file" accept=".step,.stp,.stl,.obj" multiple class="hidden" />
+              <button class="primary full" id="m-import">⬆ Import STEP / STL / OBJ file</button>
+              <div class="hint">Download your enclosure from Fusion 360, Onshape, Thingiverse… then import it. STEP files include their size units; STL/OBJ files don't (set Scale: inch → 25.4).</div>
+              <div id="m-list"></div>
+              <div id="m-xform" class="hidden">
+                <div class="grid2">
+                  <label>X (mm)<input type="number" step="0.5" id="m-x" /></label><label>Y (mm)<input type="number" step="0.5" id="m-y" /></label>
+                  <label>Z (mm)<input type="number" step="0.5" id="m-z" /></label><label>Scale<input type="number" step="0.001" id="m-s" /></label>
+                  <label>Rotate X°<input type="number" step="90" id="m-rx" /></label><label>Rotate Y°<input type="number" step="90" id="m-ry" /></label>
+                  <label>Rotate Z°<input type="number" step="90" id="m-rz" /></label>
+                </div>
+                <div class="row-inline" style="flex-wrap:wrap">
+                  <button class="ghost sm" id="m-center">Center on board</button>
+                  <button class="ghost sm" id="m-floor">Put board inside</button>
+                  <button class="ghost sm" id="m-reset">Reset</button>
+                </div>
+                <label class="chk" style="margin-top:6px"><input type="checkbox" id="m-solid" checked /> Solid (parts must not touch it)</label>
+              </div>
+              <div class="h" style="margin-top:14px">Does it fit?</div>
+              <label>Safety gap (mm)<input type="number" id="m-margin" value="0.3" step="0.1" min="0" /></label>
+              <label class="chk"><input type="checkbox" id="m-live" checked /> Re-check after every change</label>
+              <div class="row"><button class="primary" id="m-check">Check fit</button><button id="m-auto">Auto-fix: move parts</button></div>
+              <div id="m-result"></div>
+            </div>
+            <div class="mech-view">
+              <div class="toolbar">
+                <button class="ghost sm" data-mview="iso">Angle</button><button class="ghost sm" data-mview="top">Top</button><button class="ghost sm" data-mview="front">Front</button><button class="ghost sm" data-mview="side">Side</button>
+                <label class="chk"><input type="checkbox" id="m-ghost" checked /> See-through case</label>
+                <span class="muted small">Drag any part on the board to move it — wires re-route automatically</span>
+              </div>
+              <div class="canvas-wrap" id="c-mech"></div>
+            </div>
+          </div>
         </div>
-        <textarea id="json-edit" spellcheck="false"></textarea>
-      </div>
 
-      <div class="pane" id="pane-cloud">
-        <div class="toolbar">
-          <button class="primary sm" id="cloud-save">☁ Save current design</button>
-          <button class="ghost sm" id="cloud-refresh">Refresh</button>
-          <span class="muted small" id="cloud-info"></span>
+        <div class="pane scroll" id="pane-bom"><div id="bom-table"></div></div>
+        <div class="pane scroll" id="pane-nets"><div id="net-table"></div></div>
+
+        <div class="pane" id="pane-json">
+          <div class="toolbar">
+            <span class="muted">Edit the design data directly, then press Apply.</span>
+            <span class="grow"></span>
+            <button class="ghost sm" id="btn-json-load">Open file</button>
+            <button class="primary sm" id="btn-json-apply">Apply</button>
+            <input type="file" id="json-file" accept=".json,application/json" class="hidden" />
+          </div>
+          <textarea id="json-edit" spellcheck="false"></textarea>
         </div>
-        <div class="scroll" style="padding:14px;overflow:auto"><div id="cloud-list"></div></div>
+
+        <div class="pane" id="pane-cloud">
+          <div class="toolbar">
+            <button class="primary sm" id="cloud-save">☁ Save this design</button>
+            <button class="ghost sm" id="cloud-refresh">Refresh</button>
+            <span class="muted small" id="cloud-info"></span>
+          </div>
+          <div class="scroll" style="padding:18px;overflow:auto"><div id="cloud-list"></div></div>
+        </div>
       </div>
     </section>
 
-    <aside class="right">
+    <!-- ================= inspector ================= -->
+    <aside class="inspector">
+      <section class="card" id="coach-card">
+        <div class="card-h">Your progress</div>
+        <div id="coach"></div>
+      </section>
       <section class="card">
-        <div class="h">Board</div>
+        <div class="card-h">Board</div>
         <div id="stats" class="stats muted">No board yet.</div>
       </section>
       <section class="card">
-        <div class="h">Export for <span id="fab-name">JLCPCB</span></div>
-        <div class="exports">
-          <button class="primary full" id="dl-gerber" disabled>⬇ Gerber + drill (.zip)</button>
-          <button class="full" id="dl-bom" disabled>⬇ BOM (.csv)</button>
-          <button class="full" id="dl-pnp" disabled>⬇ Pick &amp; place (.csv)</button>
-          <button class="full" id="dl-all" disabled>⬇ Everything (.zip)</button>
-        </div>
-        <div class="muted small" style="margin-top:8px">Every export first re-runs DRC 5×.</div>
-        <ul id="fab-notes" class="notes"></ul>
-        <a id="fab-link" class="link" target="_blank" rel="noopener">Open order page ↗</a>
-      </section>
-      <section class="card">
-        <div class="h">Self-check <span id="verify-pill" class="pill"></span></div>
-        <div id="verify"><div class="muted small">AI review ×3 and DRC ×5 run after every generation.</div></div>
-      </section>
-      <section class="card grow-card">
-        <div class="h">Design check <span id="drc-count" class="pill"></span></div>
+        <div class="card-h">Health checks <span id="verify-pill" class="pill"></span><span id="drc-count" class="pill"></span></div>
+        <div id="verify"><div class="muted small">The AI reviews its own circuit 3× and runs the design check 5× after every build.</div></div>
+        <div class="sub-h">Problems found</div>
         <ul id="drc" class="drc"></ul>
       </section>
+      <details class="card" id="rules">
+        <summary class="card-h">Board settings</summary>
+        <div class="grid2">
+          <label>Board size (mm)<span class="pair"><input type="number" step="1" min="0" id="r-bw" /><input type="number" step="1" min="0" id="r-bh" /></span><small class="muted">width × height · 0 = automatic</small></label>
+          <label>Copper layers<select id="r-layers"><option value="0">Auto (AI decides)</option><option value="2">2 — simple</option><option value="4">4 — most boards</option><option value="6">6</option><option value="8">8</option><option value="10">10</option></select><small class="muted">more layers = easier wiring, higher price</small></label>
+          <label>Board colour<span class="row-inline"><select id="r-mask">
+            <option value="#1f7a3a">Green</option><option value="#5b2a86">Purple</option><option value="#141414">Black</option>
+            <option value="#1d4f9c">Blue</option><option value="#b3202a">Red</option><option value="#f2f2ee">White</option><option value="#d9b320">Yellow</option>
+          </select><input type="color" id="r-maskc" title="Pick any colour" /></span></label>
+          <label>Text colour<span class="row-inline"><select id="r-silk"><option value="#ffffff">White</option><option value="#141414">Black</option><option value="#f0e442">Yellow</option></select><input type="color" id="r-silkc" title="Pick any colour" /></span></label>
+          <label>Corner roundness (mm)<input type="number" step="0.5" min="0" id="r-corner" /></label>
+          <label class="pro-only">Signal wire width (mm)<input type="number" step="0.05" min="0.1" id="r-track" /></label>
+          <label class="pro-only">Power wire width (mm)<input type="number" step="0.05" min="0.1" id="r-power" /></label>
+          <label class="pro-only">Wire spacing (mm)<input type="number" step="0.05" min="0.1" id="r-clear" /></label>
+          <label class="pro-only">Via size / hole (mm)<span class="pair"><input type="number" step="0.05" id="r-via" /><input type="number" step="0.05" id="r-drill" /></span></label>
+          <label class="pro-only">Board thickness<select id="r-thick"><option>0.8</option><option>1.0</option><option>1.2</option><option selected>1.6</option><option>2.0</option></select></label>
+          <label class="pro-only">Pad finish<select id="r-finish"><option value="HASL">Silver (HASL)</option><option value="ENIG">Gold (ENIG)</option></select></label>
+          <label class="chk pro-only"><input type="checkbox" id="r-pour" /> Ground fill on bottom (2-layer)</label>
+        </div>
+        <button id="btn-reroute" class="ghost full">Apply settings &amp; re-route</button>
+        <div class="muted small" style="margin-top:6px">Colours apply instantly. You can also just say “make the board matte black”.</div>
+      </details>
+      <button class="primary lg full" id="btn-export2">Export &amp; order</button>
     </aside>
   </main>
 
-  <dialog id="settings">
+  <!-- ================= dialogs ================= -->
+  <dialog id="export" class="modal wide">
+    <div class="modal-head"><h3>Export &amp; order your board</h3><button class="icon" data-close>✕</button></div>
+    <div class="modal-body">
+      <div class="step"><span class="n">1</span><b>Pick who will make it</b></div>
+      <div class="fab-picker cards">
+        <button data-fab="jlcpcb" class="seg active"><b>JLCPCB</b><span>Cheapest. Can also solder the parts on for you. Best default.</span></button>
+        <button data-fab="pcbway" class="seg"><b>PCBWay</b><span>Good service and assembly, many board colours and options.</span></button>
+        <button data-fab="oshpark" class="seg"><b>OSH Park</b><span>Hobbyist favourite (purple boards). 2 or 4 layers. No assembly.</span></button>
+      </div>
+      <div class="step"><span class="n">2</span><b>Download your files for <span id="fab-name">JLCPCB</span></b></div>
+      <div class="exports">
+        <button class="primary full" id="dl-gerber" disabled>⬇ Board files (Gerber + drill)</button>
+        <button class="full" id="dl-bom" disabled>⬇ Parts list (BOM)</button>
+        <button class="full" id="dl-pnp" disabled>⬇ Part positions</button>
+        <button class="full" id="dl-all" disabled>⬇ Everything in one zip</button>
+      </div>
+      <div class="muted small" style="margin-top:6px">Every download first re-runs the design check 5×, so the files always match your latest edits.</div>
+      <div class="step"><span class="n">3</span><b>Upload on their website</b></div>
+      <ul id="fab-notes" class="notes"></ul>
+      <a id="fab-link" class="link" target="_blank" rel="noopener">Open order page ↗</a>
+    </div>
+  </dialog>
+
+  <dialog id="welcome" class="modal wide">
+    <div class="modal-head"><h3>Welcome 👋</h3><button class="icon" data-close>✕</button></div>
+    <div class="modal-body">
+      <p class="lead">Make a real circuit board in three steps — no electronics degree needed.</p>
+      <div class="howto">
+        <div><span class="n">1</span><b>Describe it</b><p>Type what you want in the Copilot box. “A blinking LED board powered by USB-C” is enough.</p></div>
+        <div><span class="n">2</span><b>Look &amp; test it</b><p>Spin it in 3D, test power and heat, and check it fits your case. The AI already checked its own work.</p></div>
+        <div><span class="n">3</span><b>Order it</b><p>Press <i>Export &amp; order</i>, pick a factory and upload the files. Boards arrive in about a week.</p></div>
+      </div>
+      <p class="muted small">Tip: you can always change the board by chatting — “make it smaller”, “add a button”, “make the PCB black”. Stuck? Press <b>?</b> at the top.</p>
+      <div class="row"><span class="grow"></span><button class="primary lg" data-close id="welcome-go">Let’s build something</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="help" class="modal wide">
+    <div class="modal-head"><h3>Help &amp; glossary</h3><button class="icon" data-close>✕</button></div>
+    <div class="modal-body gloss">
+      <dl>
+        <dt>PCB</dt><dd>Printed circuit board — the green (or any colour) board that holds and connects the parts.</dd>
+        <dt>Layer</dt><dd>PCBs are sandwiches of copper wiring. 2 layers is cheapest and fine for simple boards. 4+ layers dedicate inner layers to ground and power, which makes busy boards easier and quieter.</dd>
+        <dt>Schematic</dt><dd>The “circuit diagram”: symbols for each part and which pins connect.</dd>
+        <dt>Net / connection</dt><dd>A group of pins that are wired together, like “GND” or “3V3”.</dd>
+        <dt>Design check (DRC)</dt><dd>Automatic inspection that wires are not too close, nothing is short-circuited or left unconnected.</dd>
+        <dt>Gerber</dt><dd>The standard file format factories use to make the board. You upload a zip of them.</dd>
+        <dt>BOM</dt><dd>Bill of materials — the shopping list of parts. Part positions tell the factory’s robot where to place each one.</dd>
+        <dt>Via</dt><dd>A tiny plated hole that carries a wire from one layer to another.</dd>
+        <dt>Regulator</dt><dd>A part that turns a higher voltage (like USB’s 5 V) into a lower one (like 3.3 V). It gets warm — check it in <i>Test power &amp; heat</i>.</dd>
+      </dl>
+      <p class="muted small"><b>Shortcuts:</b> Ctrl+Enter create · R rotate selected part · Delete remove it · arrow keys nudge it · double-click the board to fit the view.</p>
+    </div>
+  </dialog>
+
+  <dialog id="settings" class="modal">
     <form method="dialog" class="settings">
-      <h3>Settings</h3>
-      <label>Anthropic API key
+      <div class="modal-head"><h3>Settings</h3></div>
+      <label>Claude API key
         <input type="password" id="s-key" placeholder="sk-ant-…" autocomplete="off" />
       </label>
-      <p class="muted small">The key is stored only in this browser (localStorage) and sent only to api.anthropic.com. Without a key, PCBx2energy uses its built-in offline circuit templates and rule-based self-review.</p>
-      <label>Model
+      <p class="muted small">Get a key at console.anthropic.com. It is stored only in this browser and sent only to Anthropic. Without a key the app runs in demo mode with built-in example circuits.</p>
+      <label>AI model
         <select id="s-model"></select>
       </label>
       <div class="row">

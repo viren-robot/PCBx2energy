@@ -63,8 +63,7 @@ export class SimView {
     const ctx = this.ctx, b = this.board, r = this.result;
     const css = getComputedStyle(document.documentElement);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = css.getPropertyValue('--canvas-bg').trim() || '#0d1117';
-    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     if (!b) return;
     ctx.setTransform(this.scale, 0, 0, -this.scale, this.ox, this.oy + b.height * this.scale);
     ctx.save();

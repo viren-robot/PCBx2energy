@@ -120,6 +120,15 @@ export class View2D {
     this.fit();
   }
 
+  zoomBy(f: number) {
+    const cx = this.canvas.width / 2, cy = this.canvas.height / 2;
+    const ns = Math.min(400, Math.max(1, this.scale * f));
+    this.ox = cx - ((cx - this.ox) * ns) / this.scale;
+    this.oy = cy - ((cy - this.oy) * ns) / this.scale;
+    this.scale = ns;
+    this.draw();
+  }
+
   fit() {
     if (!this.board) { this.draw(); return; }
     const pad = 40 * this.dpr;
@@ -186,8 +195,7 @@ export class View2D {
     const css = getComputedStyle(document.documentElement);
     const bg = css.getPropertyValue('--canvas-bg').trim() || '#0d1117';
     const fg = css.getPropertyValue('--canvas-fg').trim() || '#6e7681';
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, width, height);
+    ctx.clearRect(0, 0, width, height);
     const b = this.board;
     if (!b) {
       ctx.fillStyle = fg;
@@ -205,7 +213,7 @@ export class View2D {
     ctx.fillStyle = shade(b.settings.maskColor, 0.42);
     ctx.fill();
     const NL = b.layers;
-    if (this.visibleLayers.length !== NL) this.visibleLayers = Array.from({ length: NL }, () => true);
+    if (this.visibleLayers.length !== NL) this.visibleLayers = Array.from({ length: NL }, (_, l) => l === 0 || l === NL - 1);
     const front = this.flipped ? NL - 1 : 0;
     const order = Array.from({ length: NL }, (_, i) => (this.flipped ? i : NL - 1 - i)); // back-most first
     const nVisible = this.visibleLayers.filter(Boolean).length;
