@@ -87,6 +87,7 @@
         <div class="grid2">
           <label>Board W × H (mm, 0 = auto)<span class="pair"><input type="number" step="1" min="0" id="r-bw" /><input type="number" step="1" min="0" id="r-bh" /></span></label>
           <label>Corner radius (mm)<input type="number" step="0.5" min="0" id="r-corner" /></label>
+          <label>Copper layers<select id="r-layers"><option value="0">Auto (AI decides)</option><option value="2">2</option><option value="4">4</option><option value="6">6</option><option value="8">8</option><option value="10">10</option></select></label>
           <label>Signal track (mm)<input type="number" step="0.05" min="0.1" id="r-track" /></label>
           <label>Power track (mm)<input type="number" step="0.05" min="0.1" id="r-power" /></label>
           <label>Clearance (mm)<input type="number" step="0.05" min="0.1" id="r-clear" /></label>
@@ -110,6 +111,8 @@
         <button class="tab active" data-tab="v2d">2D</button>
         <button class="tab" data-tab="v3d">3D</button>
         <button class="tab" data-tab="sch">Schematic</button>
+        <button class="tab" data-tab="sim">Simulation</button>
+        <button class="tab" data-tab="mech">Mechanic</button>
         <button class="tab" data-tab="bom">BOM</button>
         <button class="tab" data-tab="nets">Netlist</button>
         <button class="tab" data-tab="json">Design JSON</button>
@@ -118,8 +121,8 @@
 
       <div class="pane active" id="pane-v2d">
         <div class="toolbar">
-          <label class="chk"><input type="checkbox" data-layer="top" checked /> <i class="sw" style="background:#c83434"></i>F.Cu</label>
-          <label class="chk"><input type="checkbox" data-layer="bottom" checked /> <i class="sw" style="background:#3a68d8"></i>B.Cu</label>
+          <span id="layer-toggles" class="row-inline"></span>
+          <label class="chk">Active <select id="active-layer" style="width:auto;padding:2px 6px"></select></label>
           <label class="chk"><input type="checkbox" data-layer="pour" checked /> Pour</label>
           <label class="chk"><input type="checkbox" data-layer="silk" checked /> <i class="sw" style="background:#eee"></i>Silk</label>
           <label class="chk"><input type="checkbox" data-layer="courtyard" /> Courtyards</label>
@@ -166,6 +169,75 @@
           <span class="muted small" id="sch-info">Schematic is generated from the board — click a net label to highlight the net.</span>
         </div>
         <div class="sch-wrap" id="sch-wrap"></div>
+      </div>
+
+      <div class="pane" id="pane-sim">
+        <div class="sim-grid">
+          <div class="sim-ctl">
+            <div class="h">Power sources <span class="muted small">0 V reference = GND</span></div>
+            <div id="sim-sources"></div>
+            <datalist id="sim-targets"></datalist>
+            <div class="row-inline" style="margin:8px 0">
+              <button class="ghost sm" id="sim-add">+ Add source</button>
+              <select id="sim-preset" style="width:auto"><option value="">Preset…</option><option value="usb">USB 5 V / 0.5 A</option><option value="usb3">USB-C 5 V / 3 A</option><option value="lipo">LiPo 3.7 V / 2 A</option><option value="9">9 V / 1 A</option><option value="12">12 V / 2 A</option><option value="24">24 V / 5 A</option></select>
+            </div>
+            <div class="h" style="margin-top:14px">Environment</div>
+            <label class="rng">Ambient temperature <b><output id="sim-amb-v">25</output> °C</b><input type="range" id="sim-amb" min="-20" max="85" step="1" value="25" /></label>
+            <label class="chk"><input type="checkbox" id="sim-cascade" checked /> Let failures cascade (burnt parts open/short)</label>
+            <label class="chk"><input type="checkbox" id="sim-3dov" checked /> Show heat &amp; failures in the 3D tab</label>
+            <div id="sim-sw"></div>
+            <div class="row"><button class="primary" id="sim-run">Run simulation</button><button class="ghost" id="sim-3d">View in 3D</button></div>
+            <div class="muted small" style="margin-top:10px">DC steady-state estimate using typical datasheet values: component power/temperature, regulator dissipation, trace heating (IPC-2221), board heat spreading. It re-runs live as you move the sliders.</div>
+          </div>
+          <div class="sim-view">
+            <div class="toolbar">
+              <label class="chk">Overlay <select id="sim-overlay" style="width:auto;padding:2px 6px"><option value="temp">Temperature</option><option value="volt">Net voltage</option></select></label>
+              <span id="sim-pills" class="row-inline"></span>
+            </div>
+            <div class="canvas-wrap"><canvas id="c-sim"></canvas></div>
+            <div class="hoverbar" id="sim-hover">Hover the board for temperatures · click a part to highlight it in the table</div>
+          </div>
+          <div class="sim-res"><div id="sim-events"></div><div id="sim-table"></div><div id="sim-nets"></div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="pane-mech">
+        <div class="mech-grid">
+          <div class="mech-ctl">
+            <div class="h">Mechanical models</div>
+            <input type="file" id="m-file" accept=".step,.stp,.stl,.obj" multiple class="hidden" />
+            <button class="primary full" id="m-import">⬆ Import STEP / STL / OBJ</button>
+            <div class="muted small" style="margin:6px 0">Case, holder, bracket… STEP files carry their units. STL/OBJ have none: set the scale (inch → 25.4, cm → 10, m → 1000).</div>
+            <div id="m-list"></div>
+            <div id="m-xform" class="hidden">
+              <div class="grid2">
+                <label>X (mm)<input type="number" step="0.5" id="m-x" /></label><label>Y (mm)<input type="number" step="0.5" id="m-y" /></label>
+                <label>Z (mm)<input type="number" step="0.5" id="m-z" /></label><label>Scale<input type="number" step="0.001" id="m-s" /></label>
+                <label>Rot X°<input type="number" step="90" id="m-rx" /></label><label>Rot Y°<input type="number" step="90" id="m-ry" /></label>
+                <label>Rot Z°<input type="number" step="90" id="m-rz" /></label>
+              </div>
+              <div class="row-inline" style="flex-wrap:wrap">
+                <button class="ghost sm" id="m-center">Center on PCB</button>
+                <button class="ghost sm" id="m-floor">Floor under PCB</button>
+                <button class="ghost sm" id="m-reset">Reset</button>
+              </div>
+              <label class="chk" style="margin-top:6px"><input type="checkbox" id="m-solid" checked /> Solid (parts must not intersect it)</label>
+            </div>
+            <div class="h" style="margin-top:14px">Fit check</div>
+            <label>Clearance margin (mm)<input type="number" id="m-margin" value="0.3" step="0.1" min="0" /></label>
+            <label class="chk"><input type="checkbox" id="m-live" checked /> Re-check after every change</label>
+            <div class="row"><button class="primary" id="m-check">Check fit</button><button id="m-auto">Auto-move parts</button></div>
+            <div id="m-result"></div>
+          </div>
+          <div class="mech-view">
+            <div class="toolbar">
+              <button class="ghost sm" data-mview="iso">Iso</button><button class="ghost sm" data-mview="top">Top</button><button class="ghost sm" data-mview="front">Front</button><button class="ghost sm" data-mview="side">Side</button>
+              <label class="chk"><input type="checkbox" id="m-ghost" checked /> Translucent models</label>
+              <span class="muted small">Drag any component on the board to move it - traces re-route automatically</span>
+            </div>
+            <div class="canvas-wrap" id="c-mech"></div>
+          </div>
+        </div>
       </div>
 
       <div class="pane scroll" id="pane-bom"><div id="bom-table"></div></div>

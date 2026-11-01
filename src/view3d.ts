@@ -4,7 +4,10 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { drawCopperLayer, holePath, padPath, roundedRectPath } from './draw';
+import { heatCanvas } from './heat';
+import { STATUS_COLOR, STATUS_RANK, type SimResult } from './sim';
+import { drawCopperLayer, holePath, padOnLayer, padPath, roundedRectPath } from './draw';
+import { layerColor } from './stackup';
 import type { Silk } from './silk';
 import type { Board, PlacedComponent } from './types';
 
@@ -32,13 +35,13 @@ export function boardTexture(board: Board, silk: Silk | null, side: 0 | 1, maskC
   ctx.fillStyle = maskColor;
   ctx.fillRect(0, 0, board.width, board.height);
   // copper under the mask shows as a lighter tint
-  drawCopperLayer(ctx, board, side, mix(maskColor, '#ffffff', 0.22), { pour: true });
+  drawCopperLayer(ctx, board, side === 0 ? 0 : board.layers - 1, mix(maskColor, '#ffffff', 0.22), { pour: true });
   ctx.globalAlpha = 0.85;
   // exposed pads
   const fin = finish === 'ENIG' ? '#d9b25c' : '#d4d4d4';
   ctx.fillStyle = fin;
   ctx.beginPath();
-  for (const p of board.pads) if (p.type !== 'npth' && (side === 0 ? p.top : p.bottom)) padPath(ctx, p);
+  for (const p of board.pads) if (padOnLayer(p, side === 0 ? 0 : board.layers - 1)) padPath(ctx, p);
   ctx.globalAlpha = 1;
   ctx.fill();
   // silkscreen
@@ -63,15 +66,14 @@ export function boardTexture(board: Board, silk: Silk | null, side: 0 | 1, maskC
   return cv;
 }
 
-function copperTexture(board: Board, side: 0 | 1): HTMLCanvasElement {
+function copperTexture(board: Board, layer: number, color: string): HTMLCanvasElement {
   const ppm = Math.min(24, 4096 / Math.max(board.width, board.height));
   const cv = document.createElement('canvas');
   cv.width = Math.ceil(board.width * ppm);
   cv.height = Math.ceil(board.height * ppm);
   const ctx = cv.getContext('2d')!;
-  if (side === 0) ctx.setTransform(ppm, 0, 0, -ppm, 0, board.height * ppm);
-  else ctx.setTransform(ppm, 0, 0, ppm, 0, 0);
-  drawCopperLayer(ctx, board, side, '#d49048', { pour: true });
+  ctx.setTransform(ppm, 0, 0, -ppm, 0, board.height * ppm);
+  drawCopperLayer(ctx, board, layer, color, { pour: true });
   return cv;
 }
 
@@ -322,6 +324,16 @@ export class View3D {
   private hovered: string | null = null;
   private board: Board | null = null;
   onPick?: (ref: string) => void;
+  // mechanical overlay: imported CAD models, collision highlights, drag-to-move
+  dragEnabled = false;
+  onDrag?: (ref: string, x: number, y: number) => void;
+  private models: THREE.Object3D[] = [];
+  private hitRefs: string[] = [];
+  private hitGroup = new THREE.Group();
+  private drag: { ref: string; dx: number; dy: number; x: number; y: number; moved: boolean } | null = null;
+  private simGroup = new THREE.Group();
+  private smoke: { m: THREE.Mesh; x: number; y: number; z0: number; phase: number }[] = [];
+  private sim: { result: SimResult | null; ambient: number } = { result: null, ambient: 25 };
 
   constructor(private container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -362,13 +374,78 @@ export class View3D {
     this.resize();
     const cv = this.renderer.domElement;
     let down: { x: number; y: number } | null = null;
-    cv.addEventListener('pointerdown', (e) => (down = { x: e.clientX, y: e.clientY }));
+    cv.addEventListener('pointerdown', (e) => {
+      down = { x: e.clientX, y: e.clientY };
+      if (!this.dragEnabled || !this.board) return;
+      const ref = this.pick(e);
+      const pc = ref ? this.board.comps.find((c) => c.ref === ref) : undefined;
+      const hit = pc ? this.planePoint(e) : null;
+      if (pc && hit) { this.drag = { ref: pc.ref, dx: pc.x - hit.x, dy: pc.y - hit.y, x: pc.x, y: pc.y, moved: false }; this.controls.enabled = false; cv.setPointerCapture(e.pointerId); }
+    });
     cv.addEventListener('pointerup', (e) => {
+      if (this.drag) {
+        const d = this.drag; this.drag = null; this.controls.enabled = true;
+        if (d.moved) this.onDrag?.(d.ref, d.x, d.y);
+        down = null; return;
+      }
       if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 4) { const r = this.pick(e); if (r) this.onPick?.(r); }
       down = null;
     });
-    cv.addEventListener('pointermove', (e) => this.hover(e));
+    cv.addEventListener('pointermove', (e) => {
+      if (this.drag) {
+        const p = this.planePoint(e);
+        if (p) {
+          const x = Math.round((p.x + this.drag.dx) * 2) / 2, y = Math.round((p.y + this.drag.dy) * 2) / 2;
+          if (x !== this.drag.x || y !== this.drag.y) {
+            this.drag.x = x; this.drag.y = y; this.drag.moved = true;
+            const g = this.comps.children.find((c) => c.userData.ref === this.drag!.ref);
+            if (g) g.position.set(x, y, g.position.z);
+            this.tip.style.display = 'none';
+          }
+        }
+        return;
+      }
+      this.hover(e);
+    });
     cv.addEventListener('pointerleave', () => { this.tip.style.display = 'none'; this.setOutline(null); });
+  }
+
+  /** Board-frame point under the cursor on the plane of the PCB's top face. */
+  private planePoint(e: PointerEvent): THREE.Vector3 | null {
+    if (!this.board) return null;
+    const r = this.renderer.domElement.getBoundingClientRect();
+    this.ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.camera);
+    const zWorld = this.board.settings.thickness + this.root.position.z;
+    const out = new THREE.Vector3();
+    if (!this.ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -zWorld), out)) return null;
+    return out.sub(this.root.position);
+  }
+
+  /** Imported CAD models (already transformed into the board frame). */
+  setModels(objs: THREE.Object3D[]) {
+    for (const o of this.models) this.root.remove(o);
+    this.models = objs;
+    for (const o of objs) this.root.add(o);
+  }
+  /** Outline colliding components in red. */
+  setCollisions(refs: string[]) {
+    this.hitRefs = refs;
+    this.applyHits();
+  }
+  private applyHits() {
+    this.root.remove(this.hitGroup);
+    this.hitGroup = new THREE.Group();
+    for (const ref of this.hitRefs) {
+      const g = this.comps.children.find((c) => c.userData.ref === ref);
+      if (!g) continue;
+      const box = new THREE.Box3().setFromObject(g);
+      const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
+      // comps live in the root's local space, so convert the world box back
+      const m = new THREE.Mesh(new THREE.BoxGeometry(size.x + 0.6, size.y + 0.6, size.z + 0.6), new THREE.MeshBasicMaterial({ color: 0xff2d2d, transparent: true, opacity: 0.4, depthWrite: false }));
+      m.position.copy(centre).sub(this.root.position);
+      this.hitGroup.add(m);
+    }
+    this.root.add(this.hitGroup);
   }
 
   private pick(e: PointerEvent): string | null {
@@ -401,6 +478,47 @@ export class View3D {
     this.tip.innerHTML = `<b>${pc.ref}</b> ${pc.comp.value}<br><span>${pc.fp.id}${pc.comp.mpn ? ` · ${pc.comp.mpn}` : ''}</span>${pc.comp.description ? `<br><span>${pc.comp.description}</span>` : ''}`;
   }
 
+  /** Overlay a simulation result: board heat-map, glowing stressed parts, smoke on bursts. */
+  setSim(result: SimResult | null, ambient: number) {
+    this.sim = { result, ambient };
+    this.applySim();
+  }
+  private applySim() {
+    this.root.remove(this.simGroup);
+    this.simGroup.traverse((o) => { const m = o as THREE.Mesh; m.geometry?.dispose(); });
+    this.simGroup = new THREE.Group();
+    this.smoke = [];
+    const { result, ambient } = this.sim;
+    const b = this.board;
+    if (!b || !result?.ok) return;
+    const t = b.settings.thickness;
+    const tex = new THREE.CanvasTexture(heatCanvas(result.heat, ambient, 170));
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(b.width, b.height), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, opacity: 0.85 }));
+    plane.position.set(b.width / 2, b.height / 2, t + 0.05);
+    this.simGroup.add(plane);
+    for (const r of result.comps) {
+      if (STATUS_RANK[r.status] < STATUS_RANK.hot) continue;
+      const c = b.comps.find((q) => q.ref === r.ref);
+      if (!c) continue;
+      const bw = c.fp.body.w + 0.8, bh = c.fp.body.h + 0.8, bz = Math.max(c.fp.body.z, 0.8) + 0.5;
+      const col = new THREE.Color(STATUS_COLOR[r.status]);
+      const glow = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bz), new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: r.status === 'hot' ? 0.28 : 0.45, depthWrite: false }));
+      glow.position.set(c.x, c.y, t + bz / 2);
+      glow.rotation.z = (c.rot * Math.PI) / 180;
+      this.simGroup.add(glow);
+      if (r.status === 'burst' || r.status === 'failed') {
+        const n = r.status === 'burst' ? 5 : 3;
+        for (let i = 0; i < n; i++) {
+          const m = new THREE.Mesh(new THREE.SphereGeometry(0.9, 10, 8), new THREE.MeshBasicMaterial({ color: r.status === 'burst' ? 0x555555 : 0x888888, transparent: true, opacity: 0.4, depthWrite: false }));
+          this.simGroup.add(m);
+          this.smoke.push({ m, x: c.x, y: c.y, z0: t + bz, phase: i * (2.6 / n) });
+        }
+      }
+    }
+    this.root.add(this.simGroup);
+  }
+
   setTheme(dark: boolean) { this.scene.background = new THREE.Color(dark ? 0x1a1e24 : 0xdfe4ea); }
   setAutoRotate(on: boolean) { this.controls.autoRotate = on; this.controls.autoRotateSpeed = 1.4; }
   /** X-ray: hide mask, components and show raw copper through a translucent substrate. */
@@ -422,6 +540,15 @@ export class View3D {
   private loop = () => {
     if (!this.active) return;
     this.controls.update();
+    if (this.smoke.length) {
+      const now = performance.now() / 1000;
+      for (const sm of this.smoke) {
+        const age = ((now + sm.phase) % 2.6) / 2.6;
+        sm.m.position.set(sm.x + Math.sin(now * 2 + sm.phase) * 0.6 * age, sm.y + Math.cos(now * 1.7 + sm.phase) * 0.6 * age, sm.z0 + age * 9);
+        sm.m.scale.setScalar(0.6 + age * 2.4);
+        (sm.m.material as THREE.MeshBasicMaterial).opacity = 0.55 * (1 - age);
+      }
+    }
     this.renderer.render(this.scene, this.camera);
     this.raf = requestAnimationFrame(this.loop);
   };
@@ -435,10 +562,12 @@ export class View3D {
 
   showComponents(on: boolean) { this.compsWanted = on; this.comps.visible = on && !this.xray; }
 
-  view(kind: 'iso' | 'top' | 'bottom') {
+  view(kind: 'iso' | 'top' | 'bottom' | 'front' | 'side') {
     const s = this.boardSize;
     if (kind === 'top') this.camera.position.set(0, -0.001, s * 2.1);
     else if (kind === 'bottom') this.camera.position.set(0, 0.001, -s * 2.1);
+    else if (kind === 'front') this.camera.position.set(0, -s * 2.3, s * 0.18);
+    else if (kind === 'side') this.camera.position.set(s * 2.3, 0, s * 0.18);
     else this.camera.position.set(s * 0.55, -s * 1.25, s * 1.05);
     this.controls.target.set(0, 0, 0);
     this.controls.update();
@@ -507,12 +636,13 @@ export class View3D {
       if (side === 1) plane.rotation.x = Math.PI;
       plane.receiveShadow = true;
       this.maskGroup.add(plane);
-      // raw copper (X-ray mode)
-      const ctex = new THREE.CanvasTexture(copperTexture(board, side));
+    }
+    // raw copper of every layer (X-ray mode), stacked through the board thickness
+    for (let l = 0; l < board.layers; l++) {
+      const ctex = new THREE.CanvasTexture(copperTexture(board, l, layerColor(l, board.layers)));
       ctex.colorSpace = THREE.SRGBColorSpace;
-      const cplane = new THREE.Mesh(new THREE.PlaneGeometry(W, H), new THREE.MeshStandardMaterial({ map: ctex, transparent: true, alphaTest: 0.1, metalness: 0.8, roughness: 0.35 }));
-      cplane.position.set(W / 2, H / 2, side === 0 ? t + 0.03 : -0.03);
-      if (side === 1) cplane.rotation.x = Math.PI;
+      const cplane = new THREE.Mesh(new THREE.PlaneGeometry(W, H), new THREE.MeshStandardMaterial({ map: ctex, transparent: true, opacity: board.planes.some((q) => q.layer === l) ? 0.45 : 1, alphaTest: 0.05, metalness: 0.6, roughness: 0.4, side: THREE.DoubleSide, depthWrite: false }));
+      cplane.position.set(W / 2, H / 2, board.layers === 1 ? t : t * (1 - l / (board.layers - 1)) + (l === 0 ? 0.03 : l === board.layers - 1 ? -0.03 : 0));
       this.xrayGroup.add(cplane);
     }
     // solder: raised tinned pads (instanced) and joints on through-hole pins
@@ -548,6 +678,9 @@ export class View3D {
     sc.left = -sz; sc.right = sz; sc.top = sz; sc.bottom = -sz; sc.near = 1; sc.far = sz * 6;
     sc.updateProjectionMatrix();
     this.comps.visible = this.compsWanted;
+    this.applySim();
+    for (const o of this.models) this.root.add(o);
+    this.applyHits();
     this.root.position.set(-W / 2, -H / 2, -t / 2);
     this.view('iso');
   }

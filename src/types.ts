@@ -93,7 +93,7 @@ export interface DesignStyle {
 export interface Design {
   name: string;
   description: string;
-  board: { width: number; height: number; cornerRadius: number };
+  board: { width: number; height: number; cornerRadius: number; /** 2,4,6,8,10 - omit/0 for automatic */ layers?: number };
   components: DesignComponent[];
   nets: DesignNet[];
   notes: string[];
@@ -118,6 +118,8 @@ export interface Settings {
   silkColor: string;
   finish: 'HASL' | 'ENIG';
   gridOverride?: number;
+  /** Copper layers: 0 = automatic (AI choice, grows when routing fails), else 2/4/6/8/10. */
+  layers: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -132,6 +134,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maskColor: '#1f7a3a',
   silkColor: '#ffffff',
   finish: 'HASL',
+  layers: 0,
 };
 
 export interface PlacedComponent {
@@ -170,7 +173,7 @@ export interface NetInfo {
 
 export interface Track {
   net: number;
-  layer: 0 | 1; // 0 = top (F.Cu), 1 = bottom (B.Cu)
+  layer: number; // physical copper layer: 0 = F.Cu, layers-1 = B.Cu, in between = inner
   width: number;
   pts: [number, number][];
 }
@@ -193,6 +196,10 @@ export interface RouteResult {
 
 export interface Board {
   design: Design;
+  /** Copper layer count and per-layer role (S signal, G ground plane, P power plane). */
+  layers: number;
+  stack: ('S' | 'G' | 'P')[];
+  planes: { layer: number; net: number }[];
   settings: Settings;
   width: number;
   height: number;

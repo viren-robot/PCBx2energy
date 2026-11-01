@@ -5,7 +5,8 @@ import { FOOTPRINT_IDS, footprintCatalog } from './footprints';
 import type { Design } from './types';
 
 export const MODELS = [
-  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5 (best)' },
+  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1 (most capable)' },
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
   { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5 (faster)' },
   { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5 (cheapest)' },
 ];
@@ -20,11 +21,12 @@ const DESIGN_SCHEMA = {
     board: {
       type: 'object',
       additionalProperties: false,
-      required: ['width', 'height', 'cornerRadius'],
+      required: ['width', 'height', 'cornerRadius', 'layers'],
       properties: {
         width: { type: 'number', description: 'Board width in mm, or 0 to auto-size.' },
         height: { type: 'number', description: 'Board height in mm, or 0 to auto-size.' },
         cornerRadius: { type: 'number', description: 'Corner radius in mm (typ. 1).' },
+        layers: { type: 'integer', enum: [0, 2, 4, 6, 8, 10], description: 'Copper layer count. 2 for simple boards; 4 for MCU/USB/Wi-Fi boards with many nets (inner ground + power planes); 6-10 only for very dense or high-speed designs. 0 lets the router add layers automatically.' },
       },
     },
     components: {
@@ -95,6 +97,7 @@ Rules:
 - Include what a real board needs: decoupling caps (100nF per IC power pin + bulk), pull-ups/pull-downs, LED current-limit resistors, CC 5.1k resistors for USB-C sinks, regulator in/out caps, crystal load caps, reset/boot circuitry, programming header.
 - Prefer SMD 0603 passives, JLCPCB basic parts. Fill lcsc only if you are confident of the part number; otherwise leave it empty. Fill manufacturer + mpn for ICs, connectors and semiconductors.
 - Do not invent pins. For ICs use datasheet pin numbers matching the package.
+- Choose board.layers deliberately (2, 4, 6, 8 or 10) and say why in notes. Ground and the main power rail become inner planes on 4+ layer boards. OSH Park only builds 2 and 4 layers.
 - Set board width/height to 0 (auto) unless the user specifies a size. If the user gives a size, honour it.
 - Add 4x MountingHole_3.2mm_M3 only if asked for mounting holes or the board is larger than ~50x50mm.
 - Keep it practical: max ~60 components.
@@ -166,6 +169,7 @@ async function requestDesign(o: CallOpts): Promise<Design> {
 export function normalizeDesign(design: Design): Design {
   if (!Array.isArray(design.components) || !Array.isArray(design.nets)) throw new Error('Claude returned an incomplete design.');
   design.board ??= { width: 0, height: 0, cornerRadius: 1 };
+  design.board.layers = [2, 4, 6, 8, 10].includes(design.board.layers ?? 0) ? design.board.layers : undefined;
   design.notes ??= [];
   design.labels = (design.labels ?? []).filter((l) => l && l.ref && l.text).map((l) => ({ ref: l.ref, text: l.text.toUpperCase().slice(0, 10), pin: l.pin || undefined }));
   const st = design.style ?? {};

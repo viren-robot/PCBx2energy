@@ -1,5 +1,6 @@
 // Turns a logical Design into a placed physical Board (no routing yet).
 import { getFootprint, resolvePin } from './footprints';
+import { buildStackup, normalizeLayers } from './stackup';
 import type { Board, Design, DesignComponent, FootprintDef, NetInfo, PlacedComponent, Settings, WorldPad } from './types';
 
 const GROUND_RE = /^(GND|AGND|DGND|PGND|VSS|0V|GROUND)$/i;
@@ -168,7 +169,7 @@ function snapToGrid(it: PItem, g: number) {
   it.y = Math.round((it.y + dy) / g) * g - dy;
 }
 
-export function buildBoard(design: Design, settings: Settings, sizeScale = 1): Board {
+export function buildBoard(design: Design, settings: Settings, sizeScale = 1, layerOverride?: number): Board {
   const prep = prepare(design);
   const warnings = [...prep.warnings];
   for (const n of prep.nets) n.width = n.isGround || n.isPower ? settings.powerTrackWidth : settings.trackWidth;
@@ -219,8 +220,10 @@ export function buildBoard(design: Design, settings: Settings, sizeScale = 1): B
   for (const p of pads) if (p.net >= 0) count.set(p.net, (count.get(p.net) ?? 0) + 1);
   prep.nets.forEach((n, i) => { if ((count.get(i) ?? 0) < 2) warnings.push(`Net ${n.name} has only one pin.`); });
 
+  const layers = normalizeLayers(layerOverride ?? (settings.layers || design.board.layers || 2));
+  const su = buildStackup(layers, prep.nets, prep.nets.map((_, i) => count.get(i) ?? 0));
   return {
-    design, settings, width: W, height: H, cornerRadius, comps, pads, nets: prep.nets, keepouts,
+    design, settings, layers, stack: su.stack, planes: su.planes, width: W, height: H, cornerRadius, comps, pads, nets: prep.nets, keepouts,
     tracks: [], vias: [], unrouted: [], pourNet: -1, warnings, routeLog: [],
   };
 }

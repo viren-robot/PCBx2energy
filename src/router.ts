@@ -94,8 +94,14 @@ export function route(board: Board, progress?: Progress): RouteResult {
   const nx = Math.floor(W / g) + 1;
   const ny = Math.floor(H / g) + 1;
   const N = nx * ny;
-  const log: string[] = [`Grid ${g} mm, ${nx}x${ny} cells x 2 layers`];
-  // kinds: 0 = signal track, 1 = power track, 2 = via. map index = kind*2 + layer
+  // Routable layers only: inner ground/power planes are connected by vias and never routed as traces.
+  const rl: number[] = board.stack.map((r, l) => (r === 'S' ? l : -1)).filter((l) => l >= 0);
+  const R = rl.length;
+  const log: string[] = [`Grid ${g} mm, ${nx}x${ny} cells, ${board.layers} copper layers (${R} routable)`];
+  const allR = rl.map((_, i) => i);
+  const padLayersR = (p: WorldPad) => (p.type === 'tht' ? allR : p.top ? [0] : []);
+  const planeNetSet = new Set(board.planes.map((q) => q.net));
+  // kinds: 0 = signal track, 1 = power track, 2 = via. map index = kind*R + routable layer
   const halfW = [s.trackWidth / 2, s.powerTrackWidth / 2, s.viaDiameter / 2];
   const reach = halfW.map((h) => h + s.clearance);
   const netKind = board.nets.map((n) => (n.width > s.trackWidth + 1e-6 ? 1 : 0));
@@ -106,7 +112,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
   const stamp = (maps: Int16Array[], layer: number, shape: Shape, net: number, kinds = [0, 1, 2]) => {
     const [bx0, by0, bx1, by1] = shapeBox(shape);
     for (const k of kinds) {
-      const m = maps[k * 2 + layer];
+      const m = maps[k * R + layer];
       const e = reach[k];
       const i0 = Math.max(0, Math.floor((bx0 - e) / g)), i1 = Math.min(nx - 1, Math.ceil((bx1 + e) / g));
       const j0 = Math.max(0, Math.floor((by0 - e) / g)), j1 = Math.min(ny - 1, Math.ceil((by1 + e) / g));
@@ -123,15 +129,15 @@ export function route(board: Board, progress?: Progress): RouteResult {
   };
 
   // ---------- base obstacle maps ----------
-  const base: Int16Array[] = Array.from({ length: 6 }, () => new Int16Array(N).fill(FREE));
+  const base: Int16Array[] = Array.from({ length: 3 * R }, () => new Int16Array(N).fill(FREE));
   for (let k = 0; k < 3; k++) {
     const lim = -(s.edgeClearance + halfW[k]);
     for (let c = 0; c < N; c++) {
-      if (boardSdf(W, H, board.cornerRadius, cx(c), cy(c)) > lim) { base[k * 2][c] = BLOCK; base[k * 2 + 1][c] = BLOCK; }
+      if (boardSdf(W, H, board.cornerRadius, cx(c), cy(c)) > lim) for (let L = 0; L < R; L++) base[k * R + L][c] = BLOCK;
     }
   }
   for (const ko of board.keepouts) {
-    for (const L of [0, 1]) stamp(base, L, { t: 'rect', ...ko }, BLOCK);
+    for (const L of allR) stamp(base, L, { t: 'rect', ...ko }, BLOCK);
   }
   const thtNet = new Int16Array(N).fill(FREE); // cells inside THT copper (free layer change)
   const noVia = new Uint8Array(N); // cells where a via would touch an SMD pad (no via-in-pad)
@@ -139,7 +145,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
   for (const p of board.pads) {
     const sh = padShape(p);
     if (p.type === 'npth') {
-      for (const L of [0, 1]) stamp(base, L, { t: 'circle', x: p.x, y: p.y, r: (p.drill ?? p.w) / 2 }, BLOCK);
+      for (const L of allR) stamp(base, L, { t: 'circle', x: p.x, y: p.y, r: (p.drill ?? p.w) / 2 }, BLOCK);
       continue;
     }
     const net = p.net >= 0 ? p.net : BLOCK;
@@ -159,8 +165,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
           if (shapeDist(sh, i * g, j * g) < e) halo[c] = halo[c] === FREE || halo[c] === net ? net : BLOCK;
         }
     }
-    if (p.top) stamp(base, 0, sh, net);
-    if (p.bottom) stamp(base, 1, sh, net);
+    for (const L of padLayersR(p)) stamp(base, L, sh, net);
     if (p.type === 'tht' && p.net >= 0) {
       const [x0, y0, x1, y1] = shapeBox(sh);
       for (let j = Math.max(0, Math.floor(y0 / g)); j <= Math.min(ny - 1, Math.ceil(y1 / g)); j++)
@@ -184,10 +189,11 @@ export function route(board: Board, progress?: Progress): RouteResult {
       n.pads.push(p);
     }
   }
-  const pourNet = s.groundPour ? board.nets.findIndex((n, i) => n.isGround && netNodes[i].length > 0) : -1;
+  // 2-layer boards pour ground on the bottom copper; 4+ layer boards use real inner planes instead.
+  const pourNet = board.layers === 2 && s.groundPour ? board.nets.findIndex((n, i) => n.isGround && netNodes[i].length > 0) : -1;
 
   // ---------- search state ----------
-  const S = 2 * N;
+  const S = R * N;
   const gCost = new Float64Array(S);
   const seen = new Int32Array(S);
   const parent = new Int32Array(S);
@@ -196,7 +202,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
   let treeId = 0;
   const heap = new Heap();
   const viaCost = Math.max(10, 1.8 / g);
-  const pref = [[1, 1.3], [1.3, 1]]; // [layer][horizontal?0:1] multipliers
+  const pref = (L: number, kd: number) => (L % 2 === 0 ? (kd === 0 ? 1 : 1.3) : kd === 0 ? 1.3 : 1); // preferred direction alternates per layer
   const DIRS: [number, number, number][] = [[1, 0, 0], [-1, 0, 0], [0, 1, 1], [0, -1, 1], [1, 1, 2], [1, -1, 2], [-1, 1, 2], [-1, -1, 2]];
 
   function sourceCells(maps: Int16Array[], node: Node, net: number, kind: number): number[] {
@@ -204,10 +210,10 @@ export function route(board: Board, progress?: Progress): RouteResult {
     for (const p of node.pads) {
       const sh = padShape(p);
       const [x0, y0, x1, y1] = shapeBox(sh);
-      const layers = [p.top ? 0 : -1, p.bottom ? 1 : -1].filter((l) => l >= 0);
+      const layers = padLayersR(p);
       let any = false;
       for (const L of layers) {
-        const m = maps[kind * 2 + L];
+        const m = maps[kind * R + L];
         for (let j = Math.max(0, Math.ceil(y0 / g)); j <= Math.min(ny - 1, Math.floor(y1 / g)); j++)
           for (let i = Math.max(0, Math.ceil(x0 / g)); i <= Math.min(nx - 1, Math.floor(x1 / g)); i++) {
             const c = j * nx + i;
@@ -220,7 +226,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
         const r = Math.ceil((Math.max(p.w, p.h) / 2 + 0.3) / g);
         const ci = Math.round(p.x / g), cj = Math.round(p.y / g);
         for (const L of layers) {
-          const m = maps[kind * 2 + L];
+          const m = maps[kind * R + L];
           for (let j = cj - r; j <= cj + r; j++) for (let i = ci - r; i <= ci + r; i++) {
             if (i < 0 || j < 0 || i >= nx || j >= ny) continue;
             const c = j * nx + i;
@@ -237,23 +243,21 @@ export function route(board: Board, progress?: Progress): RouteResult {
 
   // ---------- negotiated-congestion state ----------
   // occ[idx][c]: number of nets whose committed copper keeps cell c (map idx = kind*2+layer) out of bounds.
-  const occ = Array.from({ length: 6 }, () => new Uint8Array(N));
-  const hist = Array.from({ length: 6 }, () => new Float32Array(N));
-  const mark = Array.from({ length: 6 }, () => new Int32Array(N));
+  const occ = Array.from({ length: 3 * R }, () => new Uint8Array(N));
+  const hist = Array.from({ length: 3 * R }, () => new Float32Array(N));
+  const mark = Array.from({ length: 3 * R }, () => new Int32Array(N));
   let markId = 1;
-  interface Conn { path: number[]; kind: number; pad: WorldPad; node?: Node }
+  interface Conn { path: number[]; kind: number; pad: WorldPad; node?: Node; endVia?: boolean }
   const netConns: Conn[][] = board.nets.map(() => []);
   const netCover: number[][] = board.nets.map(() => []);
 
-  /** A* from src states to any state with tree[s]==treeId, or (pour) bottom cells labelled main.
+  /** A* from src states to any state with tree[s]==treeId, a ground-pour cell, or (viaGoal) a legal via site.
    *  With pf>=0, other nets' copper (occ) is passable at a growing penalty (PathFinder). */
   function search(maps: Int16Array[], src: number[], net: number, kind: number, box: [number, number, number, number] | null,
-    pourLabel: Int32Array | null, mainLabel: number, pf = -1, softPour = false): number[] | null {
+    pourLabel: Int32Array | null, mainLabel: number, pf = -1, softPour = false, viaGoal = false): number[] | null {
     sid++;
     heap.clear();
     const soft = pf >= 0;
-    const tm = maps[kind * 2], bm = maps[kind * 2 + 1];
-    const vt = maps[4], vb = maps[5];
     const h = (c: number) => {
       if (!box) return 0;
       const i = c % nx, j = (c - i) / nx;
@@ -262,28 +266,34 @@ export function route(board: Board, progress?: Progress): RouteResult {
       return Math.max(dx, dy) + 0.4142 * Math.min(dx, dy);
     };
     const others = (idx: number, c: number) => occ[idx][c] - (mark[idx][c] === markId ? 1 : 0);
+    const viaFree = (c: number) => {
+      for (let l = 0; l < R; l++) { const v = maps[2 * R + l][c]; if (v !== FREE && v !== net) return false; }
+      return true;
+    };
     for (const st of src) {
       seen[st] = sid; gCost[st] = 0; parent[st] = -1;
       heap.push(h(st % N), st);
     }
     let expansions = 0;
     const limit = S * 2;
+    const last = R - 1;
     while (heap.n) {
       const st = heap.pop();
-      const L = st >= N ? 1 : 0;
+      const L = Math.floor(st / N);
       const c = st - L * N;
       const gc = gCost[st];
       if (heap.lastKey > (gc + h(c)) * (1 + 1e-12) + 1e-9) continue; // stale heap entry
-      if (tree[st] === treeId || (pourLabel && L === 1 && pourLabel[c] === mainLabel)
-        || (softPour && L === 1 && (maps[1][c] === FREE || maps[1][c] === net) && others(1, c) === 0 && others(kind * 2 + 1, c) === 0)) {
+      if (tree[st] === treeId || (pourLabel && L === last && pourLabel[c] === mainLabel)
+        || (softPour && L === last && (maps[last][c] === FREE || maps[last][c] === net) && others(last, c) === 0 && others(kind * R + last, c) === 0)
+        || (viaGoal && gc > 0 && !noVia[c] && viaFree(c))) {
         const path: number[] = [];
         for (let q = st; q !== -1; q = parent[q]) path.push(q);
         return path.reverse();
       }
       if (++expansions > limit) break;
       const i = c % nx, j = (c - i) / nx;
-      const m = L ? bm : tm;
-      const idx = kind * 2 + L;
+      const idx = kind * R + L;
+      const m = maps[idx];
       for (const [di, dj, kd] of DIRS) {
         const ii = i + di, jj = j + dj;
         if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
@@ -295,7 +305,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
           const a = m[j * nx + ii], b = m[jj * nx + i];
           if ((a !== FREE && a !== net) || (b !== FREE && b !== net)) continue;
           cost = 1.4142 * 1.12;
-        } else cost = pref[L][kd];
+        } else cost = pref(L, kd);
         const hv = halo[nc];
         if (hv !== FREE && hv !== net) cost += 0.3;
         if (soft) {
@@ -308,24 +318,25 @@ export function route(board: Board, progress?: Progress): RouteResult {
         seen[ns] = sid; gCost[ns] = ng; parent[ns] = st;
         heap.push(ng + h(nc), ns);
       }
-      // layer change
-      const os = (1 - L) * N + c;
-      const ov = (L ? tm : bm)[c];
-      if (ov === FREE || ov === net) {
-        const free = thtNet[c] === net;
-        const vv = vt[c], vw = vb[c];
-        if (free || (!noVia[c] && (vv === FREE || vv === net) && (vw === FREE || vw === net))) {
-          let cost = free ? 0.01 : viaCost;
-          if (soft && !free) {
-            const o = others(4, c) + others(5, c) + others(kind * 2 + 1 - L, c);
-            cost *= (1 + hist[4][c]) * (1 + pf * o);
-          }
-          const ng = gc + cost;
-          if (!(seen[os] === sid && gCost[os] <= ng)) {
-            seen[os] = sid; gCost[os] = ng; parent[os] = st;
-            heap.push(ng + h(c), os);
-          }
+      // layer change: through vias can jump to any other routable layer
+      let vf: boolean | null = null;
+      const free = thtNet[c] === net;
+      for (let L2 = 0; L2 < R; L2++) {
+        if (L2 === L) continue;
+        const ov = maps[kind * R + L2][c];
+        if (ov !== FREE && ov !== net) continue;
+        if (!free) { if (vf === null) vf = !noVia[c] && viaFree(c); if (!vf) continue; }
+        let cost = free ? 0.01 : viaCost;
+        if (soft && !free) {
+          let o = others(kind * R + L2, c);
+          for (let l = 0; l < R; l++) o += others(2 * R + l, c);
+          cost *= (1 + hist[2 * R][c]) * (1 + pf * o);
         }
+        const os = L2 * N + c;
+        const ng = gc + cost;
+        if (seen[os] === sid && gCost[os] <= ng) continue;
+        seen[os] = sid; gCost[os] = ng; parent[os] = st;
+        heap.push(ng + h(c), os);
       }
     }
     return null;
@@ -366,15 +377,15 @@ export function route(board: Board, progress?: Progress): RouteResult {
     const tracks: Track[] = [];
     const vias: Via[] = [];
     let run: [number, number][] = [];
-    let runL = path[0] >= N ? 1 : 0;
+    let runL = Math.floor(path[0] / N);
     const flush = () => {
       if (run.length >= 2) {
-        const pts = simplify(strict ? straighten(run, strict[kind * 2 + runL], net, keep) : run);
-        tracks.push({ net, layer: runL as 0 | 1, width, pts });
+        const pts = simplify(strict ? straighten(run, strict[kind * R + runL], net, keep) : run);
+        tracks.push({ net, layer: rl[runL], width, pts });
       }
     };
     for (const st of path) {
-      const L = st >= N ? 1 : 0;
+      const L = Math.floor(st / N);
       const c = st - L * N;
       const pt: [number, number] = [cx(c), cy(c)];
       if (L !== runL) {
@@ -386,10 +397,14 @@ export function route(board: Board, progress?: Progress): RouteResult {
       run.push(pt);
     }
     flush();
+    if (conn.endVia) {
+      const lc = path[path.length - 1] % N;
+      if (thtNet[lc] !== net) vias.push({ net, x: cx(lc), y: cy(lc), d: s.viaDiameter, drill: s.viaDrill });
+    }
     const p0 = path[0];
-    const L0 = p0 >= N ? 1 : 0;
+    const L0 = Math.floor(p0 / N);
     const c0 = p0 - L0 * N;
-    if (shapeDist(padShape(pad), cx(c0), cy(c0)) > 1e-6) tracks.push({ net, layer: L0 as 0 | 1, width: Math.min(width, pad.w, pad.h), pts: [[pad.x, pad.y], [cx(c0), cy(c0)]] });
+    if (shapeDist(padShape(pad), cx(c0), cy(c0)) > 1e-6) tracks.push({ net, layer: rl[L0], width: Math.min(width, pad.w, pad.h), pts: [[pad.x, pad.y], [cx(c0), cy(c0)]] });
     return { tracks, vias };
   }
 
@@ -403,7 +418,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
   function cover(net: number, layer: number, shape: Shape) {
     const [bx0, by0, bx1, by1] = shapeBox(shape);
     for (let k = 0; k < 3; k++) {
-      const idx = k * 2 + layer;
+      const idx = k * R + layer;
       const e = reach[k];
       const i0 = Math.max(0, Math.floor((bx0 - e) / g)), i1 = Math.min(nx - 1, Math.ceil((bx1 + e) / g));
       const j0 = Math.max(0, Math.floor((by0 - e) / g)), j1 = Math.min(ny - 1, Math.ceil((by1 + e) / g));
@@ -432,7 +447,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
     for (const st of path) {
       tree[st] = treeId;
       const c = st % N;
-      if (thtNet[c] === net) { tree[c] = treeId; tree[N + c] = treeId; }
+      if (thtNet[c] === net) for (let l = 0; l < R; l++) tree[l * N + c] = treeId;
     }
   }
 
@@ -506,7 +521,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
   }
 
   function pourLabels(maps: Int16Array[], net: number): { label: Int32Array; main: number } {
-    const m = maps[1]; // signal-width map on bottom layer
+    const m = maps[R - 1]; // signal-width map on bottom layer
     const label = new Int32Array(N).fill(-1);
     let best = -1, bestSize = 0, next = 0;
     const stack: number[] = [];
@@ -533,7 +548,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
 
   // ---------- 1. negotiated congestion routing of signal nets ----------
   const hpwl = (net: number) => { const b = nodeBox(netNodes[net]); return (b[2] - b[0]) + (b[3] - b[1]); };
-  const signal = board.nets.map((_, i) => i).filter((i) => i !== pourNet && netNodes[i].length >= 2).sort((a, b) => hpwl(a) - hpwl(b));
+  const signal = board.nets.map((_, i) => i).filter((i) => i !== pourNet && !planeNetSet.has(i) && netNodes[i].length >= 2).sort((a, b) => hpwl(a) - hpwl(b));
   if (pourNet >= 0) signal.push(pourNet);
   const hardFail = new Map<number, { a: [number, number]; b: [number, number] }[]>();
   const t0 = Date.now();
@@ -544,14 +559,14 @@ export function route(board: Board, progress?: Progress): RouteResult {
     markOwn(net);
     const out: number[] = [];
     for (const conn of netConns[net]) {
-      let prevL = conn.path[0] >= N ? 1 : 0;
+      let prevL = Math.floor(conn.path[0] / N);
       for (const st of conn.path) {
-        const L = st >= N ? 1 : 0;
+        const L = Math.floor(st / N);
         const c = st - L * N;
-        const idx = conn.kind * 2 + L;
+        const idx = conn.kind * R + L;
         if (occ[idx][c] - (mark[idx][c] === markId ? 1 : 0) > 0) out.push(idx * N + c);
         if (L !== prevL && thtNet[c] !== net) {
-          for (const vi of [4, 5]) if (occ[vi][c] - (mark[vi][c] === markId ? 1 : 0) > 0) out.push(vi * N + c);
+          for (let l = 0; l < R; l++) { const vi = 2 * R + l; if (occ[vi][c] - (mark[vi][c] === markId ? 1 : 0) > 0) out.push(vi * N + c); }
         }
         prevL = L;
       }
@@ -569,8 +584,8 @@ export function route(board: Board, progress?: Progress): RouteResult {
       const fails = routeNet(net, base, pf, (conn) => {
         netConns[net].push(conn);
         const gm = geometry(conn, net, null);
-        for (const t of gm.tracks) for (const sh of trackShapes(t)) cover(net, t.layer, sh);
-        for (const v of gm.vias) for (const L of [0, 1]) cover(net, L, { t: 'circle', x: v.x, y: v.y, r: v.d / 2 });
+        for (const t of gm.tracks) for (const sh of trackShapes(t)) cover(net, rl.indexOf(t.layer), sh);
+        for (const v of gm.vias) for (const L of allR) cover(net, L, { t: 'circle', x: v.x, y: v.y, r: v.d / 2 });
       });
       if (fails.length) hardFail.set(net, fails); else hardFail.delete(net);
     }
@@ -601,16 +616,16 @@ export function route(board: Board, progress?: Progress): RouteResult {
   }
   const commit = (net: number, conn: Conn, straight = true) => {
     const gm = geometry(conn, net, straight ? strict : null, anchors.get(net));
-    for (const t of gm.tracks) { tracks.push(t); for (const sh of trackShapes(t)) stamp(strict, t.layer, sh, net); }
-    for (const v of gm.vias) { vias.push(v); for (const L of [0, 1]) stamp(strict, L, { t: 'circle', x: v.x, y: v.y, r: v.d / 2 }, net); }
+    for (const t of gm.tracks) { tracks.push(t); for (const sh of trackShapes(t)) stamp(strict, rl.indexOf(t.layer), sh, net); }
+    for (const v of gm.vias) { vias.push(v); for (const L of allR) stamp(strict, L, { t: 'circle', x: v.x, y: v.y, r: v.d / 2 }, net); }
   };
   // stamp raw (unstraightened) copper of good nets first so straightening respects everyone
   for (const net of signal) {
     if (bad.has(net)) continue;
     for (const conn of netConns[net]) {
       const gm = geometry(conn, net, null);
-      for (const t of gm.tracks) for (const sh of trackShapes(t)) stamp(strict, t.layer, sh, net);
-      for (const v of gm.vias) for (const L of [0, 1]) stamp(strict, L, { t: 'circle', x: v.x, y: v.y, r: v.d / 2 }, net);
+      for (const t of gm.tracks) for (const sh of trackShapes(t)) stamp(strict, rl.indexOf(t.layer), sh, net);
+      for (const v of gm.vias) for (const L of allR) stamp(strict, L, { t: 'circle', x: v.x, y: v.y, r: v.d / 2 }, net);
     }
   }
   for (const net of signal) if (!bad.has(net)) for (const conn of netConns[net]) commit(net, conn);
@@ -651,6 +666,29 @@ export function route(board: Board, progress?: Progress): RouteResult {
       }
       if (conn) commit(pourNet, conn, false);
       else unrouted.push({ net: pourNet, a: [node.pads[0].x, node.pads[0].y], b: [node.pads[0].x, node.pads[0].y] });
+    }
+  }
+  // ---------- 4. inner planes: a via beside every SMD pad of a plane net ----------
+  if (board.planes.length) {
+    progress?.(0.97, 'Connecting plane nets with vias');
+    const seenNets = new Set<number>();
+    for (const { net } of board.planes) {
+      if (seenNets.has(net)) continue;
+      seenNets.add(net);
+      const kind = netKind[net];
+      for (const node of netNodes[net]) {
+        if (node.pads.some((p) => p.type === 'tht')) continue; // plated barrel already touches every plane
+        treeId++;
+        let conn: Conn | null = null;
+        for (const k of kind === 1 ? [1, 0] : [0]) {
+          const src = sourceCells(strict, node, net, k);
+          if (!src.length) continue;
+          const path = search(strict, src, net, k, null, null, -1, -1, false, true);
+          if (path) { conn = { path, kind: k, pad: startPad(node, path[0]), endVia: true }; break; }
+        }
+        if (conn) commit(net, conn, false);
+        else unrouted.push({ net, a: [node.pads[0].x, node.pads[0].y], b: [node.pads[0].x, node.pads[0].y] });
+      }
     }
   }
   log.push(`Result: ${tracks.length} tracks, ${vias.length} vias, ${unrouted.length} unrouted, ${((Date.now() - t0) / 1000).toFixed(1)} s`);

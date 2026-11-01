@@ -1,16 +1,19 @@
 // Interactive 2D board viewer (KiCad-style layer colours) with pan/zoom, hover info and net highlight.
 import { drawCopperLayer, holePath, roundedRectPath } from './draw';
 import { courtyardRect } from './layout';
+import { layerColor } from './stackup';
 import type { Silk } from './silk';
 import type { Board, WorldPad } from './types';
 
-export interface Layers2D { top: boolean; bottom: boolean; silk: boolean; pour: boolean; ratsnest: boolean; courtyard: boolean; drc: boolean }
+export interface Layers2D { silk: boolean; pour: boolean; ratsnest: boolean; courtyard: boolean; drc: boolean }
 
 export class View2D {
   private ctx: CanvasRenderingContext2D;
   board: Board | null = null;
   silk: Silk | null = null;
-  layers: Layers2D = { top: true, bottom: true, silk: true, pour: true, ratsnest: true, courtyard: false, drc: true };
+  /** Visibility per physical copper layer (index = layer). */
+  visibleLayers: boolean[] = [true, true];
+  layers: Layers2D = { silk: true, pour: true, ratsnest: true, courtyard: false, drc: true };
   markers: { x: number; y: number }[] = [];
   private scale = 10;
   private ox = 0;
@@ -21,6 +24,8 @@ export class View2D {
   private dpr = 1;
   onHover?: (text: string) => void;
   flipped = false;
+  /** Layer drawn at full strength (others dimmed). */
+  activeLayer = 0;
   /** Editing: set by the app. */
   selected: string | null = null;
   editable = true;
@@ -199,12 +204,14 @@ export class View2D {
     roundedRectPath(ctx, 0, 0, b.width, b.height, b.cornerRadius);
     ctx.fillStyle = shade(b.settings.maskColor, 0.42);
     ctx.fill();
-    const order: (0 | 1)[] = this.flipped ? [0, 1] : [1, 0];
+    const NL = b.layers;
+    if (this.visibleLayers.length !== NL) this.visibleLayers = Array.from({ length: NL }, () => true);
+    const front = this.flipped ? NL - 1 : 0;
+    const order = Array.from({ length: NL }, (_, i) => (this.flipped ? i : NL - 1 - i)); // back-most first
+    const nVisible = this.visibleLayers.filter(Boolean).length;
     for (const L of order) {
-      if (L === 1 && !this.layers.bottom) continue;
-      if (L === 0 && !this.layers.top) continue;
-      const front = this.flipped ? L === 1 : L === 0;
-      drawCopperLayer(ctx, b, L, L === 0 ? '#c83434' : '#3a68d8', { pour: this.layers.pour, highlightNet: this.highlight, dim: !front && (this.layers.top && this.layers.bottom) });
+      if (!this.visibleLayers[L]) continue;
+      drawCopperLayer(ctx, b, L, layerColor(L, NL), { pour: this.layers.pour, highlightNet: this.highlight, dim: L !== front && nVisible > 1 && (NL <= 2 || L !== this.activeLayer) });
     }
     // holes
     ctx.beginPath();

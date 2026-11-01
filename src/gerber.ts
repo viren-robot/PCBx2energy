@@ -1,6 +1,7 @@
 // Gerber RS-274X (with X2 file attributes) and Excellon drill writers.
+import { fillNetOf, padOnLayer } from './draw';
 import { buildSilk, type Silk } from './silk';
-import type { Board, WorldPad } from './types';
+import type { Board } from './types';
 
 const fmt = (v: number) => Math.round(v * 1e6).toString(); // 4.6 format, mm
 
@@ -75,33 +76,36 @@ export function roundedRect(x0: number, y0: number, x1: number, y1: number, r: n
 }
 
 export interface LayerSet {
+  /** Inner copper layers in order (empty for 2-layer boards). */
+  inner: string[];
   F_Cu: string; B_Cu: string; F_Mask: string; B_Mask: string; F_Silk: string; B_Silk: string; F_Paste: string; B_Paste: string; Edge_Cuts: string;
   PTH: string; NPTH: string;
 }
 
 const MASK_EXP = 0.05;
 
-function copper(board: Board, layer: 0 | 1, date: Date): string {
-  const gw = new GerberWriter(layer === 0 ? 'Copper,L1,Top' : 'Copper,L2,Bot', 'Positive', date);
+function copper(board: Board, layer: number, date: Date): string {
+  const NL = board.layers;
+  const fn = layer === 0 ? 'Copper,L1,Top' : layer === NL - 1 ? `Copper,L${NL},Bot` : `Copper,L${layer + 1},Inr`;
+  const gw = new GerberWriter(fn, 'Positive', date);
   const s = board.settings;
-  const onLayer = (p: WorldPad) => p.type !== 'npth' && (layer === 0 ? p.top : p.bottom);
-  const pour = board.pourNet >= 0 && layer === 1;
-  if (pour) {
+  const fillNet = fillNetOf(board, layer);
+  if (fillNet >= 0) {
     const e = s.edgeClearance;
     gw.region(roundedRect(e, e, board.width - e, board.height - e, Math.max(0, board.cornerRadius - e)));
     gw.polarity('C');
     const pc = pourClearance(board);
     for (const p of board.pads) {
       if (p.type === 'npth') { gw.flashPad(p.x, p.y, (p.drill ?? p.w) + 2 * pc, (p.drill ?? p.w) + 2 * pc, 'circle'); continue; }
-      if (!onLayer(p) || p.net === board.pourNet) continue;
+      if (!padOnLayer(p, layer) || p.net === fillNet) continue;
       gw.flashPad(p.x, p.y, p.w + 2 * pc, p.h + 2 * pc, p.shape === 'rect' ? 'rect' : p.shape);
     }
-    for (const t of board.tracks) if (t.layer === 1 && t.net !== board.pourNet) gw.polyline(t.pts, t.width + 2 * pc);
-    for (const v of board.vias) if (v.net !== board.pourNet) gw.flashPad(v.x, v.y, v.d + 2 * pc, v.d + 2 * pc, 'circle');
+    for (const t of board.tracks) if (t.layer === layer && t.net !== fillNet) gw.polyline(t.pts, t.width + 2 * pc);
+    for (const v of board.vias) if (v.net !== fillNet) gw.flashPad(v.x, v.y, v.d + 2 * pc, v.d + 2 * pc, 'circle');
     for (const k of board.keepouts) gw.region([[k.x0, k.y0], [k.x1, k.y0], [k.x1, k.y1], [k.x0, k.y1]]);
     gw.polarity('D');
   }
-  for (const p of board.pads) if (onLayer(p)) gw.flashPad(p.x, p.y, p.w, p.h, p.shape);
+  for (const p of board.pads) if (padOnLayer(p, layer)) gw.flashPad(p.x, p.y, p.w, p.h, p.shape);
   for (const t of board.tracks) if (t.layer === layer) gw.polyline(t.pts, t.width);
   for (const v of board.vias) gw.flashPad(v.x, v.y, v.d, v.d, 'circle');
   return gw.toString();
@@ -187,8 +191,9 @@ export function excellon(board: Board, which: 'PTH' | 'NPTH' | 'ALL', date = new
 export function buildLayers(board: Board, date = new Date()): LayerSet {
   const silk = buildSilk(board);
   return {
+    inner: Array.from({ length: board.layers - 2 }, (_, i) => copper(board, i + 1, date)),
     F_Cu: copper(board, 0, date),
-    B_Cu: copper(board, 1, date),
+    B_Cu: copper(board, board.layers - 1, date),
     F_Mask: mask(board, 0, date),
     B_Mask: mask(board, 1, date),
     F_Silk: silkLayer(silk, 0, date),

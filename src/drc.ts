@@ -1,5 +1,6 @@
 // Geometric design-rule check on the routed board (clearance, edge clearance, connectivity).
 import { courtyardRect } from './layout';
+import { layerName } from './stackup';
 import { boardSdf, padShape } from './router';
 import type { Board } from './types';
 
@@ -52,19 +53,19 @@ function collectObjs(board: Board): Obj[] {
   };
   for (const p of board.pads) {
     if (p.type === 'npth') {
-      for (const L of [0, 1]) add(-100 - p.id, L, { ax: p.x, ay: p.y, bx: p.x, by: p.y, r: (p.drill ?? p.w) / 2 }, `hole ${p.ref}`);
+      for (let L = 0; L < board.layers; L++) add(-100 - p.id, L, { ax: p.x, ay: p.y, bx: p.x, by: p.y, r: (p.drill ?? p.w) / 2 }, `hole ${p.ref}`);
       continue;
     }
     const sh = padShape(p);
     const cap: Cap = sh.t === 'rect' ? { rect: [sh.x0, sh.y0, sh.x1, sh.y1] } : sh.t === 'circle' ? { ax: sh.x, ay: sh.y, bx: sh.x, by: sh.y, r: sh.r } : sh;
     const net = p.net >= 0 ? p.net : -1000 - p.id;
-    if (p.top) add(net, 0, cap, `pad ${p.ref}.${p.pin}`);
-    if (p.bottom) add(net, 1, cap, `pad ${p.ref}.${p.pin}`);
+    if (p.type === 'tht') { for (let L = 0; L < board.layers; L++) add(net, L, cap, `pad ${p.ref}.${p.pin}`); }
+    else if (p.top) add(net, 0, cap, `pad ${p.ref}.${p.pin}`);
   }
   for (const t of board.tracks) for (let i = 0; i + 1 < t.pts.length; i++) {
     add(t.net, t.layer, { ax: t.pts[i][0], ay: t.pts[i][1], bx: t.pts[i + 1][0], by: t.pts[i + 1][1], r: t.width / 2 }, `track ${board.nets[t.net]?.name}`);
   }
-  for (const v of board.vias) for (const L of [0, 1]) add(v.net, L, { ax: v.x, ay: v.y, bx: v.x, by: v.y, r: v.d / 2 }, `via ${board.nets[v.net]?.name}`);
+  for (const v of board.vias) for (let L = 0; L < board.layers; L++) add(v.net, L, { ax: v.x, ay: v.y, bx: v.x, by: v.y, r: v.d / 2 }, `via ${board.nets[v.net]?.name}`);
   return objs;
 }
 
@@ -104,8 +105,13 @@ export function runLvs(board: Board): DrcIssue[] {
   for (const a of byPad.values()) for (let i = 1; i < a.length; i++) union(a[0], a[i]);
   // the bottom ground pour joins every ground pad/via that reaches it
   if (board.pourNet >= 0) {
-    const gnd = objs.map((o, i) => [o, i] as const).filter(([o]) => o.net === board.pourNet && o.layer === 1);
+    const gnd = objs.map((o, i) => [o, i] as const).filter(([o]) => o.net === board.pourNet && o.layer === board.layers - 1);
     for (let i = 1; i < gnd.length; i++) union(gnd[0][1], gnd[i][1]);
+  }
+  // inner planes join every pad/via of their net that reaches that layer
+  for (const pl of board.planes) {
+    const on = objs.map((o, i) => [o, i] as const).filter(([o]) => o.net === pl.net && o.layer === pl.layer);
+    for (let i = 1; i < on.length; i++) union(on[0][1], on[i][1]);
   }
   // bridged pads (internal connections, e.g. switch legs) are one node by definition
   const clusters = new Map<number, Set<number>>();
@@ -179,7 +185,7 @@ export function runDrc(board: Board): DrcIssue[] {
         if (count <= 50) {
           const x = (Math.max(A.box[0], B.box[0]) + Math.min(A.box[2], B.box[2])) / 2;
           const y = (Math.max(A.box[1], B.box[1]) + Math.min(A.box[3], B.box[3])) / 2;
-          issues.push({ kind: 'clearance', msg: `${A.what} ↔ ${B.what} on ${A.layer ? 'B.Cu' : 'F.Cu'}: ${Math.max(0, d).toFixed(3)} mm < ${s.clearance} mm`, x, y });
+          issues.push({ kind: 'clearance', msg: `${A.what} ↔ ${B.what} on ${layerName(A.layer, board.layers)}: ${Math.max(0, d).toFixed(3)} mm < ${s.clearance} mm`, x, y });
         }
       }
     }

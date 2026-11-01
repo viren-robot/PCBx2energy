@@ -1,4 +1,5 @@
 import type { Session } from '@supabase/supabase-js';
+import * as THREE from 'three';
 import './style.css';
 import { generateDesign, MODELS } from './ai';
 import { adminLogin, deleteCloudDesign, displayName, isAdminSession, listCloudDesigns, saveCloudDesign, sendMagicLink, signOut, supabase } from './cloud';
@@ -9,13 +10,17 @@ import { buildSchematic, schematicDownload, type Schematic } from './schematic';
 import { buildSilk, type Silk } from './silk';
 import { isStyleOnly, parseStyle } from './style';
 import { EXAMPLES, offlineDesign } from './templates';
+import { applyTransform, autoMove, boundsOf, checkFit, countTriangles, IDENTITY, loadModelBuffer, type FitResult, type MechModel, type MechTransform } from './mech';
+import { simulate, STATUS_COLOR, STATUS_ICON, STATUS_RANK, type SimResult, type SimSource } from './sim';
+import { SimView } from './simview';
 import { DEFAULT_SETTINGS, type Board, type Design, type DesignStyle, type FabId, type Settings } from './types';
+import { layerColor, layerName } from './stackup';
 import { DRC_RUNS, REVIEW_PASSES, selfReview, type DrcRun, type ReviewPass } from './verify';
 import { View2D, type Layers2D } from './view2d';
 import { View3D } from './view3d';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const LS = { key: 'pcbx2.apiKey', model: 'pcbx2.model', design: 'pcbx2.design', settings: 'pcbx2.settings', fab: 'pcbx2.fab', theme: 'pcbx2.theme' };
+const LS = { key: 'pcbx2.apiKey', model: 'pcbx2.model.v2', design: 'pcbx2.design', settings: 'pcbx2.settings', fab: 'pcbx2.fab', theme: 'pcbx2.theme' };
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
 // ---------------- state ----------------
@@ -38,6 +43,8 @@ const vstate: { reviews: ReviewPass[]; drc: DrcRun[]; running: string; stale: bo
 
 const view2d = new View2D($<HTMLCanvasElement>('c2d'));
 const view3d = new View3D($('c3d'));
+const viewMech = new View3D($('c-mech'));
+const simView = new SimView($<HTMLCanvasElement>('c-sim'));
 view2d.onHover = (t) => ($('hover').textContent = t);
 
 // ---------------- theme ----------------
@@ -45,13 +52,16 @@ function setTheme(t: 'dark' | 'light') {
   document.documentElement.setAttribute('data-theme', t);
   localStorage.setItem(LS.theme, t);
   view3d.setTheme(t === 'dark');
+  viewMech.setTheme(t === 'dark');
   view2d.draw();
+  simView.draw();
 }
 const curTheme = () => (document.documentElement.getAttribute('data-theme') as 'dark' | 'light') || 'dark';
 const toggleTheme = () => setTheme(curTheme() === 'dark' ? 'light' : 'dark');
 $('btn-theme').onclick = toggleTheme;
 $('a-theme').onclick = toggleTheme;
 view3d.setTheme(curTheme() === 'dark');
+viewMech.setTheme(curTheme() === 'dark');
 
 // ---------------- worker ----------------
 let worker: Worker | null = null;
@@ -266,7 +276,7 @@ async function verifyAndShow(d: Design, fresh: boolean) {
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
   const errs = drc.filter((x) => x.kind !== 'warning').length;
   if (errs) { setStatus(`Done in ${secs}s - ${errs} DRC issue(s) remain. See Design check.`, 'err'); log(`Finished with <b>${errs}</b> DRC issue(s).`); }
-  else { setStatus(`Done in ${secs}s - passed ${REVIEW_PASSES} reviews and ${DRC_RUNS} DRC runs. Ready to export.`, 'ok'); log(`Layout: ${r.board.width.toFixed(0)}×${r.board.height.toFixed(0)} mm, ${r.board.tracks.length} tracks, ${r.board.vias.length} vias - <b>verified</b>`); }
+  else { setStatus(`Done in ${secs}s - ${r.board.layers}-layer board passed ${REVIEW_PASSES} reviews and ${DRC_RUNS} DRC runs. Ready to export.`, 'ok'); log(`Layout: ${r.board.width.toFixed(0)}×${r.board.height.toFixed(0)} mm, ${r.board.tracks.length} tracks, ${r.board.vias.length} vias - <b>verified</b>`); }
   renderVerify();
 }
 
@@ -292,15 +302,31 @@ function setBoard(b: Board | null, keepView = false) {
   view2d.selected = selected && b?.comps.some((c) => c.ref === selected) ? selected : null;
   if (!view2d.selected) selected = null;
   view2d.setBoard(b, silk, keepView);
+  renderLayerToggles();
   view3dDirty = true;
   if ($('pane-v3d').classList.contains('active')) refresh3d();
   if ($('pane-sch').classList.contains('active')) renderSchematic();
   else schem = null;
   renderStats(); renderDrc(); renderBom(); renderNets(); renderSel();
+  onBoardChangedForTabs();
   $<HTMLTextAreaElement>('json-edit').value = design ? JSON.stringify(design, null, 2) : '';
   for (const id of ['dl-gerber', 'dl-bom', 'dl-pnp', 'dl-all']) $<HTMLButtonElement>(id).disabled = !b;
   if (b && design) { $<HTMLInputElement>('r-bw').value = String(design.board.width || 0); $<HTMLInputElement>('r-bh').value = String(design.board.height || 0); $<HTMLInputElement>('r-corner').value = String(design.board.cornerRadius ?? 1); }
 }
+
+function renderLayerToggles() {
+  const b = board;
+  const box = $('layer-toggles');
+  const sel = $<HTMLSelectElement>('active-layer');
+  if (!b) { box.innerHTML = ''; sel.innerHTML = ''; return; }
+  const NL = b.layers;
+  if (view2d.visibleLayers.length !== NL) view2d.visibleLayers = Array.from({ length: NL }, () => true);
+  box.innerHTML = Array.from({ length: NL }, (_, l) => `<label class="chk" title="${b.stack[l] === 'S' ? 'signal layer' : b.stack[l] === 'G' ? 'ground plane' : 'power plane'}"><input type="checkbox" data-lyr="${l}" ${view2d.visibleLayers[l] ? 'checked' : ''}/> <i class="sw" style="background:${layerColor(l, NL)}"></i>${layerName(l, NL)}<span class="muted small">${b.stack[l] === 'S' ? '' : b.stack[l]}</span></label>`).join('');
+  box.querySelectorAll<HTMLInputElement>('[data-lyr]').forEach((c) => c.addEventListener('change', () => { view2d.visibleLayers[+c.dataset.lyr!] = c.checked; view2d.draw(); }));
+  sel.innerHTML = Array.from({ length: NL }, (_, l) => `<option value="${l}">${layerName(l, NL)}</option>`).join('');
+  sel.value = String(Math.min(view2d.activeLayer, NL - 1));
+}
+$('active-layer').addEventListener('change', (e) => { view2d.activeLayer = +(e.target as HTMLSelectElement).value; view2d.draw(); });
 
 function refresh3d() {
   if (!view3dDirty) return;
@@ -390,7 +416,7 @@ function renderStats() {
   const rows: [string, string][] = [
     ['Name', b.design.name],
     ['Size', `${b.width.toFixed(1)} × ${b.height.toFixed(1)} mm`],
-    ['Layers', `2 · ${b.settings.thickness} mm · ${b.settings.finish}`],
+    ['Layers', `${b.layers} (${b.stack.join('')}) · ${b.settings.thickness} mm · ${b.settings.finish}`],
     ['Parts', `${smd} SMD · ${tht} THT`],
     ['Nets', String(b.nets.length)],
     ['Tracks', `${b.tracks.length} · ${(len / 10).toFixed(1)} cm`],
@@ -627,6 +653,7 @@ function download(f: OutFile) {
 async function exportFile(which: 'gerberZip' | 'bom' | 'pnp' | 'all') {
   if (!board || !design || busy) return;
   // Every export re-runs the 5x DRC on the current design first.
+  if (fab === 'oshpark' && board.layers > 4 && !confirm(`OSH Park only builds 2- and 4-layer boards; this design has ${board.layers} layers. Export anyway (e.g. to send to another fab)?`)) return;
   const ok = await reverify();
   if (!board) return;
   const errs = drc.filter((d) => d.kind !== 'warning').length;
@@ -679,7 +706,10 @@ function activateTab(name: string) {
   document.querySelectorAll<HTMLButtonElement>('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll<HTMLElement>('.pane').forEach((p) => p.classList.toggle('active', p.id === `pane-${name}`));
   view3d.setActive(name === 'v3d');
+  viewMech.setActive(name === 'mech');
   if (name === 'v3d') refresh3d();
+  if (name === 'mech') refreshMech();
+  if (name === 'sim') { renderSimInputs(); simView.resize(); scheduleSim(0); }
   if (name === 'v2d') view2d.resize();
   if (name === 'sch') renderSchematic();
   if (name === 'cloud') void refreshCloud();
@@ -694,6 +724,7 @@ function loadRules() {
   $<HTMLInputElement>('r-drill').value = String(settings.viaDrill);
   $<HTMLSelectElement>('r-thick').value = String(settings.thickness);
   $<HTMLInputElement>('r-pour').checked = settings.groundPour;
+  $<HTMLSelectElement>('r-layers').value = String(settings.layers || 0);
   syncStyleControls();
 }
 function readRules() {
@@ -707,6 +738,7 @@ function readRules() {
     viaDrill: num('r-drill', 0.2, 0.3),
     thickness: parseFloat($<HTMLSelectElement>('r-thick').value),
     groundPour: $<HTMLInputElement>('r-pour').checked,
+    layers: parseInt($<HTMLSelectElement>('r-layers').value, 10) || 0,
   };
   if (settings.viaDrill > settings.viaDiameter - 0.2) settings.viaDrill = Math.max(0.2, settings.viaDiameter - 0.3);
   localStorage.setItem(LS.settings, JSON.stringify(settings));
@@ -747,7 +779,7 @@ $('r-silk').addEventListener('change', () => applyStyle({ silkColor: $<HTMLSelec
 $('r-silkc').addEventListener('input', () => applyStyle({ silkColor: $<HTMLInputElement>('r-silkc').value }));
 $('r-finish').addEventListener('change', () => applyStyle({ finish: $<HTMLSelectElement>('r-finish').value as 'HASL' | 'ENIG' }));
 $('r-thick').addEventListener('change', () => { readRules(); if (board) { board.settings.thickness = settings.thickness; view3dDirty = true; if ($('pane-v3d').classList.contains('active')) refresh3d(); } });
-for (const id of ['r-track', 'r-power', 'r-clear', 'r-via', 'r-drill', 'r-pour', 'r-bw', 'r-bh', 'r-corner']) $(id).addEventListener('change', () => { readRules(); log('Rules changed - press <b>Apply &amp; re-route</b>.'); });
+for (const id of ['r-track', 'r-power', 'r-clear', 'r-via', 'r-drill', 'r-pour', 'r-bw', 'r-bh', 'r-corner', 'r-layers']) $(id).addEventListener('change', () => { readRules(); log('Rules changed - press <b>Apply &amp; re-route</b>.'); });
 
 document.querySelectorAll<HTMLButtonElement>('.tab').forEach((t) => (t.onclick = () => activateTab(t.dataset.tab!)));
 document.querySelectorAll<HTMLButtonElement>('.fab-picker .seg').forEach((b) => (b.onclick = () => {
@@ -815,6 +847,219 @@ dlg.addEventListener('close', () => {
   }
   updateAiMode();
 });
+
+// ================= Simulation tab =================
+let simSources: SimSource[] = [];
+let simResult: SimResult | null = null;
+let simTimer: number | undefined;
+let simSeq = 1;
+const simClosed = new Set<string>();
+let simSelected: string | null = null;
+
+function defaultSources(b: Board): SimSource[] {
+  const names = b.nets.map((n) => n.name);
+  const usb = names.find((n) => /^vbus$/i.test(n));
+  if (usb) return [{ id: 'S1', target: usb, volts: 5, limitA: 0.5, enabled: true }];
+  const pw = b.nets.map((n, i) => ({ n, i, c: b.pads.filter((p) => p.net === i).length })).filter((x) => x.n.isPower).sort((a, c) => c.c - a.c)[0];
+  if (!pw) return [{ id: 'S1', target: names.find((n) => !/gnd/i.test(n)) ?? '', volts: 5, limitA: 1, enabled: true }];
+  const m = pw.n.name.match(/(\d+)V(\d)?/i);
+  const v = m ? parseFloat(`${m[1]}${m[2] ? '.' + m[2] : ''}`) : 5;
+  return [{ id: 'S1', target: pw.n.name, volts: v, limitA: 1, enabled: true }];
+}
+function renderSimInputs() {
+  const b = board;
+  if (!b) { $('sim-sources').innerHTML = '<p class="muted small">Generate a board first.</p>'; return; }
+  if (!simSources.length || !simSources.every((s) => b.nets.some((n) => n.name.toLowerCase() === s.target.toLowerCase()) || /^[^.]+\.\w+/.test(s.target))) simSources = defaultSources(b);
+  const dl = $('sim-targets');
+  const pins = new Set<string>();
+  for (const p of b.pads) if (p.net >= 0 && /^J|^SW|^U/.test(p.ref) && pins.size < 120) pins.add(`${p.ref}.${p.pin}`);
+  dl.innerHTML = [...b.nets.map((n) => `<option value="${esc(n.name)}">net</option>`), ...[...pins].map((q) => `<option value="${esc(q)}">pin</option>`)].join('');
+  $('sim-sources').innerHTML = simSources.map((s, i) => `<div class="src" data-i="${i}">
+    <div class="r1"><input type="checkbox" data-f="enabled" ${s.enabled ? 'checked' : ''} title="Enable" /><input type="text" data-f="target" list="sim-targets" value="${esc(s.target)}" placeholder="net or REF.PIN" style="flex:1" /><button class="ghost sm" data-del="${i}" title="Remove">✕</button></div>
+    <div class="r2"><span>Voltage</span><span></span><input type="range" data-f="volts" min="-30" max="60" step="0.1" value="${s.volts}" /><input type="number" data-f="volts" step="0.1" value="${s.volts}" /></div>
+    <div class="r2"><span>Current limit (A)</span><span></span><input type="range" data-f="limitA" min="0.01" max="10" step="0.01" value="${s.limitA}" /><input type="number" data-f="limitA" step="0.01" min="0.01" value="${s.limitA}" /></div>
+  </div>`).join('');
+  $('sim-sources').querySelectorAll<HTMLInputElement>('input[data-f]').forEach((inp) => inp.addEventListener('input', () => {
+    const i = +(inp.closest('.src') as HTMLElement).dataset.i!;
+    const f = inp.dataset.f as 'enabled' | 'target' | 'volts' | 'limitA';
+    const src = simSources[i];
+    if (f === 'enabled') src.enabled = inp.checked;
+    else if (f === 'target') src.target = inp.value;
+    else { const v = parseFloat(inp.value); if (Number.isFinite(v)) { (src as unknown as Record<string, number>)[f] = v; (inp.closest('.src') as HTMLElement).querySelectorAll<HTMLInputElement>(`input[data-f="${f}"]`).forEach((o) => { if (o !== inp) o.value = String(v); }); } }
+    scheduleSim();
+  }));
+  $('sim-sources').querySelectorAll<HTMLButtonElement>('[data-del]').forEach((x) => (x.onclick = () => { simSources.splice(+x.dataset.del!, 1); renderSimInputs(); scheduleSim(0); }));
+  const sws = b.comps.filter((c) => /^SW_/.test(c.fp.id));
+  $('sim-sw').innerHTML = sws.length ? `<div class="h" style="margin-top:10px">Switches</div>${sws.map((c) => `<label class="chk"><input type="checkbox" data-sw="${c.ref}" ${simClosed.has(c.ref) ? 'checked' : ''} /> Press ${c.ref} (${esc(c.comp.description || c.comp.value)})</label>`).join('<br>')}` : '';
+  $('sim-sw').querySelectorAll<HTMLInputElement>('[data-sw]').forEach((c) => c.addEventListener('change', () => { if (c.checked) simClosed.add(c.dataset.sw!); else simClosed.delete(c.dataset.sw!); scheduleSim(0); }));
+}
+function scheduleSim(delay = 120) {
+  window.clearTimeout(simTimer);
+  simTimer = window.setTimeout(() => { if ($('pane-sim').classList.contains('active') || simResult) runSim(); }, delay);
+}
+function runSim() {
+  if (!board) return;
+  const amb = +$<HTMLInputElement>('sim-amb').value;
+  $('sim-amb-v').textContent = String(amb);
+  const t0 = performance.now();
+  const res = simulate(board, { sources: simSources, ambientC: amb, closedSwitches: [...simClosed], cascade: $<HTMLInputElement>('sim-cascade').checked });
+  simResult = res;
+  simView.overlay = $<HTMLSelectElement>('sim-overlay').value as 'temp' | 'volt';
+  simView.set(board, res, amb);
+  view3d.setSim($<HTMLInputElement>('sim-3dov').checked && res.ok ? res : null, amb);
+  renderSimResults(res, performance.now() - t0);
+}
+function renderSimResults(res: SimResult, ms: number) {
+  const ev = $('sim-events'), tb = $('sim-table'), nt = $('sim-nets'), pills = $('sim-pills');
+  if (!res.ok) { ev.innerHTML = `<div class="ev">${esc(res.error ?? 'Simulation failed')}</div>`; tb.innerHTML = ''; nt.innerHTML = ''; pills.innerHTML = ''; return; }
+  const worst = res.comps.reduce((a, c) => (STATUS_RANK[c.status] > STATUS_RANK[a] ? c.status : a), 'off' as SimResult['comps'][0]['status']);
+  pills.innerHTML = [
+    `<span class="stat ${STATUS_RANK[worst] >= STATUS_RANK.failed ? 'bad' : STATUS_RANK[worst] >= STATUS_RANK.hot ? 'warn' : ''}">${STATUS_ICON[worst]} ${worst === 'off' ? 'idle' : worst}</span>`,
+    `<span class="stat">Total ${res.totalW.toFixed(2)} W</span>`,
+    `<span class="stat">Hot spot ${res.maxBoardC.toFixed(0)} °C</span>`,
+    ...res.sources.map((s) => `<span class="stat ${s.limited ? 'bad' : ''}">${esc(s.net)} ${s.vActual.toFixed(2)} V · ${(s.iA * 1000).toFixed(0)} mA${s.limited ? ' (limit!)' : ''}</span>`),
+  ].join('');
+  const bad = res.events;
+  ev.innerHTML = (bad.length ? bad.map((e) => `<div class="ev">${esc(e)}</div>`).join('') : '<div class="ev ok">All parts and traces are within their ratings for these inputs.</div>') + `<div class="muted small" style="margin:4px 0">${res.cascadeRounds ? `${res.cascadeRounds} failure round(s) simulated · ` : ''}solved in ${ms.toFixed(0)} ms</div>`;
+  const rows = [...res.comps].sort((a, c) => STATUS_RANK[c.status] - STATUS_RANK[a.status] || c.tempC - a.tempC);
+  tb.innerHTML = `<table><thead><tr><th></th><th>Part</th><th>V</th><th>I</th><th>P</th><th>T</th></tr></thead><tbody>${rows.map((r) => `<tr data-ref="${r.ref}" class="${r.ref === simSelected ? 'sel' : ''}"><td class="st" style="color:${STATUS_COLOR[r.status]}" title="${r.status}">${STATUS_ICON[r.status]}</td><td><b>${esc(r.ref)}</b> <span class="muted">${esc(r.value)}</span>${r.messages.length ? `<div class="muted small">${esc(r.messages.join(' · '))}</div>` : ''}</td><td class="mono">${(r.vSupply || r.vAcross).toFixed(2)}</td><td class="mono">${Math.abs(r.i) < 1 ? (r.i * 1000).toFixed(1) + 'mA' : r.i.toFixed(2) + 'A'}</td><td class="mono">${(r.p * 1000).toFixed(0)}mW</td><td class="mono">${r.tempC.toFixed(0)}°</td></tr>`).join('')}</tbody></table>`;
+  tb.querySelectorAll<HTMLElement>('tr[data-ref]').forEach((tr) => (tr.onclick = () => { simSelected = tr.dataset.ref!; simView.selected = simSelected; simView.draw(); renderSimResults(res, ms); }));
+  nt.innerHTML = `<div class="h" style="margin-top:12px">Net voltages</div><table><tbody>${Object.entries(res.netV).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="mono">${v.toFixed(3)} V</td></tr>`).join('')}</tbody></table>`;
+}
+simView.onHover = (t) => ($('sim-hover').textContent = t);
+simView.onPick = (ref) => { simSelected = ref; if (simResult) renderSimResults(simResult, 0); };
+$('sim-add').onclick = () => { simSources.push({ id: `S${++simSeq}`, target: board?.nets.find((n) => n.isPower)?.name ?? '', volts: 5, limitA: 1, enabled: true }); renderSimInputs(); scheduleSim(0); };
+$('sim-preset').addEventListener('change', (e) => {
+  const sel = e.target as HTMLSelectElement;
+  const P: Record<string, [number, number]> = { usb: [5, 0.5], usb3: [5, 3], lipo: [3.7, 2], 9: [9, 1], 12: [12, 2], 24: [24, 5] };
+  const pr = P[sel.value];
+  if (pr && simSources[0]) { simSources[0].volts = pr[0]; simSources[0].limitA = pr[1]; simSources[0].enabled = true; renderSimInputs(); scheduleSim(0); }
+  sel.value = '';
+});
+for (const id of ['sim-amb', 'sim-cascade']) $(id).addEventListener('input', () => scheduleSim());
+$('sim-overlay').addEventListener('change', () => { simView.overlay = $<HTMLSelectElement>('sim-overlay').value as 'temp' | 'volt'; simView.draw(); });
+$('sim-3dov').addEventListener('change', () => { if ($<HTMLInputElement>('sim-3dov').checked && simResult?.ok) view3d.setSim(simResult, +$<HTMLInputElement>('sim-amb').value); else view3d.setSim(null, 25); });
+$('sim-run').onclick = () => runSim();
+$('sim-3d').onclick = () => { runSim(); activateTab('v3d'); };
+
+// ================= Mechanic tab =================
+const mech: { models: MechModel[]; sel: string | null; fit: FitResult | null; seq: number; dirty: boolean } = { models: [], sel: null, fit: null, seq: 1, dirty: true };
+const mechMargin = () => Math.max(0, parseFloat($<HTMLInputElement>('m-margin').value) || 0);
+function refreshMech() {
+  if (!mech.dirty) return;
+  mech.dirty = false;
+  viewMech.setBoard(board, silk);
+  viewMech.dragEnabled = true;
+  viewMech.setModels(mech.models.filter((m) => m.visible).map((m) => m.object));
+  viewMech.setCollisions(mech.fit?.partsCollide ?? []);
+}
+function onBoardChangedForTabs() {
+  mech.dirty = true;
+  if ($('pane-mech').classList.contains('active')) { refreshMech(); if ($<HTMLInputElement>('m-live').checked && mech.models.length) runFit(); }
+  if (simSources.length || $('pane-sim').classList.contains('active')) { renderSimInputs(); scheduleSim(0); }
+}
+function syncModels() {
+  for (const m of mech.models) applyTransform(m.object, m.t);
+  viewMech.setModels(mech.models.filter((m) => m.visible).map((m) => m.object));
+}
+function renderModelList() {
+  $('m-list').innerHTML = mech.models.map((m) => {
+    const sz = boundsOf(m.object).getSize(new THREE.Vector3());
+    return `<div class="mrow ${m.id === mech.sel ? 'sel' : ''}" data-id="${m.id}"><input type="checkbox" data-vis ${m.visible ? 'checked' : ''} title="Visible" /><span class="nm" title="${esc(m.name)}">${esc(m.name)}</span><span class="muted small">${sz.x.toFixed(0)}×${sz.y.toFixed(0)}×${sz.z.toFixed(0)} mm</span><button class="ghost" data-rm title="Remove">✕</button></div>`;
+  }).join('');
+  $('m-list').querySelectorAll<HTMLElement>('.mrow').forEach((row) => {
+    const m = mech.models.find((q) => q.id === row.dataset.id)!;
+    row.addEventListener('click', (e) => { const t = e.target as HTMLElement; if (t.closest('[data-rm]')) return; if (t.matches('[data-vis]')) return; mech.sel = m.id; renderModelList(); loadXform(); });
+    row.querySelector<HTMLInputElement>('[data-vis]')!.addEventListener('change', (e) => { m.visible = (e.target as HTMLInputElement).checked; syncModels(); autoFit(); });
+    row.querySelector<HTMLElement>('[data-rm]')!.addEventListener('click', () => { mech.models = mech.models.filter((q) => q !== m); if (mech.sel === m.id) mech.sel = mech.models[0]?.id ?? null; syncModels(); renderModelList(); loadXform(); mech.fit = null; renderFit(); autoFit(); });
+  });
+}
+const selModel = () => mech.models.find((m) => m.id === mech.sel);
+function loadXform() {
+  const m = selModel();
+  $('m-xform').classList.toggle('hidden', !m);
+  if (!m) return;
+  const t = m.t;
+  for (const [id, v] of Object.entries({ 'm-x': t.x, 'm-y': t.y, 'm-z': t.z, 'm-s': t.scale, 'm-rx': t.rx, 'm-ry': t.ry, 'm-rz': t.rz })) $<HTMLInputElement>(id).value = String(+v.toFixed(3));
+  $<HTMLInputElement>('m-solid').checked = m.solid;
+}
+function readXform() {
+  const m = selModel();
+  if (!m) return;
+  const n = (id: string, d: number) => { const v = parseFloat($<HTMLInputElement>(id).value); return Number.isFinite(v) ? v : d; };
+  m.t = { x: n('m-x', 0), y: n('m-y', 0), z: n('m-z', 0), scale: n('m-s', 1) || 1, rx: n('m-rx', 0), ry: n('m-ry', 0), rz: n('m-rz', 0) };
+  m.solid = $<HTMLInputElement>('m-solid').checked;
+  syncModels(); renderModelList(); autoFit();
+}
+['m-x', 'm-y', 'm-z', 'm-s', 'm-rx', 'm-ry', 'm-rz', 'm-solid'].forEach((id) => $(id).addEventListener('input', readXform));
+function placeModel(m: MechModel, mode: 'center' | 'floor') {
+  if (!board) return;
+  applyTransform(m.object, { ...m.t, x: 0, y: 0, z: 0 });
+  const bb = boundsOf(m.object);
+  const c = bb.getCenter(new THREE.Vector3());
+  const t: MechTransform = { ...m.t };
+  if (mode === 'center') { t.x = board.width / 2 - c.x; t.y = board.height / 2 - c.y; }
+  else t.z = -2 - bb.min.z; // floor 2 mm below the PCB underside
+  m.t = t;
+  applyTransform(m.object, t);
+}
+$('m-center').onclick = () => { const m = selModel(); if (m) { placeModel(m, 'center'); loadXform(); syncModels(); autoFit(); } };
+$('m-floor').onclick = () => { const m = selModel(); if (m) { placeModel(m, 'floor'); loadXform(); syncModels(); autoFit(); } };
+$('m-reset').onclick = () => { const m = selModel(); if (m) { m.t = { ...IDENTITY }; loadXform(); syncModels(); autoFit(); } };
+$('m-import').onclick = () => $<HTMLInputElement>('m-file').click();
+$<HTMLInputElement>('m-file').addEventListener('change', async (e) => {
+  const input = e.target as HTMLInputElement;
+  for (const f of Array.from(input.files ?? [])) {
+    try {
+      setStatus(`Importing ${f.name}…`, 'busy');
+      const obj = await loadModelBuffer(f.name, await f.arrayBuffer());
+      const m: MechModel = { id: `m${mech.seq++}`, name: f.name, object: obj, t: { ...IDENTITY }, visible: true, solid: true, tris: countTriangles(obj) };
+      mech.models.push(m); mech.sel = m.id;
+      placeModel(m, 'center');
+      log(`Imported <b>${esc(f.name)}</b> (${m.tris.toLocaleString()} triangles)`);
+      setStatus(`Imported ${f.name}.`, 'ok');
+    } catch (err) { setStatus((err as Error).message, 'err'); log(`<span style="color:var(--danger)">Import failed:</span> ${esc((err as Error).message)}`); }
+  }
+  input.value = '';
+  syncModels(); renderModelList(); loadXform(); mech.dirty = true; refreshMech(); autoFit();
+});
+function runFit() {
+  if (!board) return;
+  mech.fit = checkFit(board, mech.models, mechMargin());
+  viewMech.setCollisions(mech.fit.partsCollide);
+  renderFit();
+}
+function autoFit() { if ($<HTMLInputElement>('m-live').checked && mech.models.length) runFit(); }
+function renderFit() {
+  const el = $('m-result'), f = mech.fit;
+  if (!f) { el.innerHTML = '<div class="muted small" style="margin-top:8px">Import a model and press “Check fit”.</div>'; return; }
+  if (!f.collisions.length) { el.innerHTML = `<div class="ev ok" style="margin-top:8px">✓ Everything fits: ${f.checkedParts} parts and the PCB outline clear the model by ≥ ${mechMargin()} mm (${f.ms} ms).</div>`; return; }
+  el.innerHTML = `<div style="margin-top:8px">${f.collisions.map((c) => `<div class="ev" data-ref="${esc(c.ref)}" style="cursor:pointer">${c.kind === 'board' ? '⛔' : '⚠'} ${esc(c.message)}</div>`).join('')}</div>${f.partsCollide.length ? '<div class="muted small">Drag the red parts, or press “Auto-move parts”.</div>' : '<div class="muted small">Move or rotate the model, or enlarge the case.</div>'}`;
+  el.querySelectorAll<HTMLElement>('[data-ref]').forEach((d) => (d.onclick = () => { selected = d.dataset.ref!; view2d.selected = selected; renderSel(); }));
+}
+$('m-check').onclick = () => { if (!mech.models.length) { setStatus('Import a STEP/STL file first.', 'err'); return; } runFit(); };
+$('m-margin').addEventListener('change', autoFit);
+$('m-live').addEventListener('change', autoFit);
+$('m-ghost').addEventListener('change', () => { const op = $<HTMLInputElement>('m-ghost').checked ? 0.4 : 1; for (const m of mech.models) m.object.traverse((o) => { const me = o as THREE.Mesh; if (me.isMesh) { const mt = me.material as THREE.MeshStandardMaterial; mt.opacity = op; mt.transparent = op < 1; } }); });
+$('m-auto').onclick = async () => {
+  if (!board || !design || busy) return;
+  if (!mech.models.length) { setStatus('Import a STEP/STL file first.', 'err'); return; }
+  const fit = checkFit(board, mech.models, mechMargin());
+  mech.fit = fit; renderFit();
+  if (!fit.partsCollide.length) { setStatus(fit.boardCollides ? 'Parts are fine, but the PCB outline itself touches the model.' : 'Nothing to move - everything fits.', fit.boardCollides ? 'err' : 'ok'); return; }
+  const r = autoMove(board, mech.models, mechMargin(), fit.partsCollide);
+  if (!r.moves.length) { setStatus(`Could not find free space for ${r.stuck.join(', ')}. Enlarge the board or move the model.`, 'err'); return; }
+  await edit((d) => { for (const m of r.moves) { const c = d.components.find((q) => q.ref === m.ref); if (c) { c.x = m.toX; c.y = m.toY; c.rotation = m.rot; } } }, `Moving ${r.moves.length} part(s) to fit the case…`);
+  log(`Mechanical auto-fit moved <b>${r.moves.map((m) => m.ref).join(', ')}</b>${r.stuck.length ? `; could not move ${r.stuck.join(', ')}` : ''}. Traces re-routed.`);
+  const ok = await reverify(); // 5x DRC on the updated board so the Gerbers it produces are clean
+  mech.dirty = true; refreshMech(); runFit();
+  setStatus(`${r.moves.length} part(s) moved, PCB re-routed${ok ? ' and verified (5× DRC)' : ' - DRC reports issues'}. Gerber/BOM/CPL now reflect the new layout.`, ok ? 'ok' : 'err');
+  const left = mech.fit?.collisions.length ?? 0;
+  if (left) log(`${left} mechanical conflict(s) remain (edge connectors, the PCB outline, or no free space).`);
+};
+viewMech.onPick = (ref) => { selected = ref; view2d.selected = ref; renderSel(); };
+viewMech.onDrag = (ref, x, y) => { void edit((d) => { const c = d.components.find((q) => q.ref === ref); if (c) { c.x = x; c.y = y; } }, `Moving ${ref}…`); };
+document.querySelectorAll<HTMLButtonElement>('[data-mview]').forEach((b) => (b.onclick = () => viewMech.view(b.dataset.mview as 'iso' | 'top' | 'front' | 'side')));
 
 // ---------------- boot ----------------
 loadRules();
