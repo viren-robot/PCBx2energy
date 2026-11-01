@@ -3,10 +3,10 @@ import { buildBoard } from './layout';
 import { route, type Progress } from './router';
 import type { Board, Design, Settings } from './types';
 
-export function runPipeline(design: Design, settings: Settings, progress?: Progress): Board {
+export function runPipeline(design: Design, settings: Settings, progress?: Progress, startScale = 1): Board {
   const auto = !(design.board.width > 0 && design.board.height > 0);
   let best: Board | null = null;
-  const scales = auto ? [1, 1.2, 1.45] : [1];
+  const scales = auto ? [startScale, startScale * 1.2, startScale * 1.45] : [1];
   for (let i = 0; i < scales.length; i++) {
     progress?.(0, i === 0 ? 'Placing components' : `Re-placing on a larger board (attempt ${i + 1})`);
     const board = buildBoard(design, settings, scales[i]);

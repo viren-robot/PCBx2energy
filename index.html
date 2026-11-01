@@ -1,12 +1,49 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PCBx2energy — Text to PCB</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231f7a3a'/><path d='M8 10h8v6h8' stroke='%23e3b341' stroke-width='3' fill='none'/><circle cx='8' cy='10' r='3' fill='%23ddd'/><circle cx='24' cy='16' r='3' fill='%23ddd'/><circle cx='12' cy='23' r='3' fill='%23ddd'/></svg>" />
+  <script>
+    (function () {
+      var t = localStorage.getItem('pcbx2.theme');
+      if (!t) t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
 </head>
 <body>
+  <!-- ============ login ============ -->
+  <div id="auth" class="auth">
+    <div class="auth-card">
+      <h1><span class="logo">⚡</span> PCBx2energy</h1>
+      <p>Sign in to design PCBs from text.</p>
+      <div class="auth-tabs">
+        <button class="active" data-atab="email">Email link</button>
+        <button data-atab="admin">Admin</button>
+      </div>
+      <form id="form-email" class="auth-form">
+        <label>Your email (Gmail works)
+          <input type="email" id="a-email" placeholder="you@gmail.com" autocomplete="email" required />
+        </label>
+        <button class="primary" type="submit" id="a-send">Send me a sign-in link</button>
+        <div class="muted small">We email you a one-time link. Click it and you are signed in — no password.</div>
+      </form>
+      <form id="form-admin" class="auth-form hidden">
+        <label>Admin username <span class="muted">(not case sensitive)</span>
+          <input type="text" id="a-user" placeholder="stellarx1" autocomplete="username" autocapitalize="off" spellcheck="false" required />
+        </label>
+        <label>Password
+          <input type="password" id="a-pass" autocomplete="current-password" required />
+        </label>
+        <button class="primary" type="submit" id="a-login">Admin sign in</button>
+      </form>
+      <div id="a-msg" class="msg"></div>
+      <div style="display:flex;justify-content:flex-end"><button class="ghost sm" id="a-theme" type="button">◐ Theme</button></div>
+    </div>
+  </div>
+
   <header class="topbar">
     <div class="brand"><span class="logo">⚡</span> PCBx2energy <span class="tag">Text → PCB</span></div>
     <div class="fab-picker" role="radiogroup" aria-label="Fabrication house">
@@ -17,7 +54,9 @@
     </div>
     <div class="top-actions">
       <span id="ai-mode" class="pill"></span>
-      <button id="btn-settings" class="ghost" title="Settings">⚙ Settings</button>
+      <button id="btn-theme" class="ghost" title="Toggle dark / light mode">◐</button>
+      <button id="btn-settings" class="ghost" title="Settings">⚙</button>
+      <span class="user-chip"><span id="user-name" class="muted"></span><span id="admin-badge" class="badge hidden">admin</span><button id="btn-logout" class="ghost sm">Sign out</button></span>
     </div>
   </header>
 
@@ -25,13 +64,14 @@
     <aside class="left">
       <section class="card">
         <label class="h" for="prompt">Describe your board</label>
-        <textarea id="prompt" rows="5" placeholder="e.g. ESP32 board with USB-C power, 3.3V regulator, BME280 sensor on I2C, status LED and 4 mounting holes, 50x40mm"></textarea>
+        <textarea id="prompt" rows="5" placeholder="e.g. ESP32 board with USB-C power, 3.3V regulator, BME280 on I2C, status LED, 4 mounting holes, matte black PCB with gold finish"></textarea>
         <div class="row">
           <label class="chk"><input type="checkbox" id="refine" /> Modify current design</label>
           <span class="grow"></span>
           <button id="btn-cancel" class="ghost hidden">Cancel</button>
           <button id="btn-generate" class="primary">Generate PCB</button>
         </div>
+        <div class="muted small" style="margin-top:8px">AI designs, labels, routes and colours the board, then reviews its own work 3× and runs DRC 5× before you export. You can edit everything afterwards.</div>
         <div class="examples" id="examples"></div>
       </section>
 
@@ -43,21 +83,25 @@
       </section>
 
       <details class="card" id="rules">
-        <summary class="h">Design rules</summary>
+        <summary class="h">Board &amp; design rules</summary>
         <div class="grid2">
+          <label>Board W × H (mm, 0 = auto)<span class="pair"><input type="number" step="1" min="0" id="r-bw" /><input type="number" step="1" min="0" id="r-bh" /></span></label>
+          <label>Corner radius (mm)<input type="number" step="0.5" min="0" id="r-corner" /></label>
           <label>Signal track (mm)<input type="number" step="0.05" min="0.1" id="r-track" /></label>
           <label>Power track (mm)<input type="number" step="0.05" min="0.1" id="r-power" /></label>
           <label>Clearance (mm)<input type="number" step="0.05" min="0.1" id="r-clear" /></label>
           <label>Via Ø / drill (mm)<span class="pair"><input type="number" step="0.05" id="r-via" /><input type="number" step="0.05" id="r-drill" /></span></label>
           <label>Board thickness<select id="r-thick"><option>0.8</option><option>1.0</option><option>1.2</option><option selected>1.6</option><option>2.0</option></select></label>
           <label>Surface finish<select id="r-finish"><option>HASL</option><option>ENIG</option></select></label>
-          <label>Solder mask<select id="r-mask">
-            <option value="#1f7a3a">Green</option><option value="#5b2a86">Purple</option><option value="#1a1a1a">Black</option>
-            <option value="#1d4f9c">Blue</option><option value="#b3202a">Red</option><option value="#f0f0f0">White</option><option value="#d9a520">Yellow</option>
-          </select></label>
+          <label>Solder mask<span class="row-inline"><select id="r-mask">
+            <option value="#1f7a3a">Green</option><option value="#5b2a86">Purple</option><option value="#141414">Black</option>
+            <option value="#1d4f9c">Blue</option><option value="#b3202a">Red</option><option value="#f2f2ee">White</option><option value="#d9b320">Yellow</option>
+          </select><input type="color" id="r-maskc" title="Custom mask colour" /></span></label>
+          <label>Silkscreen<span class="row-inline"><select id="r-silk"><option value="#ffffff">White</option><option value="#141414">Black</option><option value="#f0e442">Yellow</option></select><input type="color" id="r-silkc" title="Custom silk colour" /></span></label>
           <label class="chk"><input type="checkbox" id="r-pour" /> GND pour (bottom)</label>
         </div>
-        <button id="btn-reroute" class="ghost full">Re-place &amp; re-route</button>
+        <button id="btn-reroute" class="ghost full">Apply &amp; re-route</button>
+        <div class="muted small" style="margin-top:6px">Colours apply instantly. Tip: just type “make the PCB matte black” and press Generate.</div>
       </details>
     </aside>
 
@@ -65,10 +109,13 @@
       <nav class="tabs" role="tablist">
         <button class="tab active" data-tab="v2d">2D</button>
         <button class="tab" data-tab="v3d">3D</button>
+        <button class="tab" data-tab="sch">Schematic</button>
         <button class="tab" data-tab="bom">BOM</button>
         <button class="tab" data-tab="nets">Netlist</button>
         <button class="tab" data-tab="json">Design JSON</button>
+        <button class="tab" data-tab="cloud">Cloud</button>
       </nav>
+
       <div class="pane active" id="pane-v2d">
         <div class="toolbar">
           <label class="chk"><input type="checkbox" data-layer="top" checked /> <i class="sw" style="background:#c83434"></i>F.Cu</label>
@@ -82,20 +129,45 @@
           <button class="ghost sm" id="btn-fit">Fit</button>
           <button class="ghost sm" id="btn-png2d">PNG</button>
         </div>
+        <div class="editbar">
+          <b>Edit</b>
+          <span class="sel" id="sel-info">Drag a part to move it · click to select</span>
+          <button class="ghost sm" id="e-rot" disabled>Rotate (R)</button>
+          <button class="ghost sm" id="e-del" disabled>Delete (Del)</button>
+          <span class="grow"></span>
+          <select id="e-fp"></select>
+          <input type="text" id="e-val" placeholder="value" size="8" />
+          <button class="ghost sm" id="e-add">+ Add part</button>
+        </div>
         <div class="canvas-wrap"><canvas id="c2d"></canvas></div>
-        <div class="hoverbar" id="hover">Scroll to zoom · drag to pan · click a pad or track to highlight its net · double-click to fit</div>
+        <div class="hoverbar" id="hover">Scroll to zoom · drag empty space to pan · drag a part to move it (traces re-route automatically) · click a pad to highlight its net · double-click to fit</div>
       </div>
+
       <div class="pane" id="pane-v3d">
         <div class="toolbar">
           <button class="ghost sm" data-view="iso">Iso</button>
           <button class="ghost sm" data-view="top">Top</button>
           <button class="ghost sm" data-view="bottom">Bottom</button>
           <label class="chk"><input type="checkbox" id="show-comps" checked /> Components</label>
+          <label class="chk"><input type="checkbox" id="xray" /> X-ray copper</label>
+          <label class="chk"><input type="checkbox" id="autorot" /> Auto-rotate</label>
+          <span class="muted small">Hover a part for details · click to select it</span>
           <span class="grow"></span>
           <button class="ghost sm" id="btn-png3d">PNG</button>
         </div>
         <div class="canvas-wrap" id="c3d"></div>
       </div>
+
+      <div class="pane" id="pane-sch">
+        <div class="toolbar">
+          <button class="ghost sm" id="sch-regen">↻ Regenerate from PCB</button>
+          <button class="ghost sm" id="sch-fit">Fit</button>
+          <button class="ghost sm" id="sch-dl">⬇ SVG</button>
+          <span class="muted small" id="sch-info">Schematic is generated from the board — click a net label to highlight the net.</span>
+        </div>
+        <div class="sch-wrap" id="sch-wrap"></div>
+      </div>
+
       <div class="pane scroll" id="pane-bom"><div id="bom-table"></div></div>
       <div class="pane scroll" id="pane-nets"><div id="net-table"></div></div>
       <div class="pane" id="pane-json">
@@ -107,6 +179,15 @@
           <input type="file" id="json-file" accept=".json,application/json" class="hidden" />
         </div>
         <textarea id="json-edit" spellcheck="false"></textarea>
+      </div>
+
+      <div class="pane" id="pane-cloud">
+        <div class="toolbar">
+          <button class="primary sm" id="cloud-save">☁ Save current design</button>
+          <button class="ghost sm" id="cloud-refresh">Refresh</button>
+          <span class="muted small" id="cloud-info"></span>
+        </div>
+        <div class="scroll" style="padding:14px;overflow:auto"><div id="cloud-list"></div></div>
       </div>
     </section>
 
@@ -123,8 +204,13 @@
           <button class="full" id="dl-pnp" disabled>⬇ Pick &amp; place (.csv)</button>
           <button class="full" id="dl-all" disabled>⬇ Everything (.zip)</button>
         </div>
+        <div class="muted small" style="margin-top:8px">Every export first re-runs DRC 5×.</div>
         <ul id="fab-notes" class="notes"></ul>
         <a id="fab-link" class="link" target="_blank" rel="noopener">Open order page ↗</a>
+      </section>
+      <section class="card">
+        <div class="h">Self-check <span id="verify-pill" class="pill"></span></div>
+        <div id="verify"><div class="muted small">AI review ×3 and DRC ×5 run after every generation.</div></div>
       </section>
       <section class="card grow-card">
         <div class="h">Design check <span id="drc-count" class="pill"></span></div>
@@ -139,7 +225,7 @@
       <label>Anthropic API key
         <input type="password" id="s-key" placeholder="sk-ant-…" autocomplete="off" />
       </label>
-      <p class="muted small">The key is stored only in this browser (localStorage) and sent only to api.anthropic.com. Without a key, PCBx2energy uses its built-in offline circuit templates.</p>
+      <p class="muted small">The key is stored only in this browser (localStorage) and sent only to api.anthropic.com. Without a key, PCBx2energy uses its built-in offline circuit templates and rule-based self-review.</p>
       <label>Model
         <select id="s-model"></select>
       </label>

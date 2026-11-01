@@ -1,8 +1,9 @@
 // Geometric design-rule check on the routed board (clearance, edge clearance, connectivity).
+import { courtyardRect } from './layout';
 import { boardSdf, padShape } from './router';
 import type { Board } from './types';
 
-export interface DrcIssue { kind: 'clearance' | 'unrouted' | 'edge' | 'warning'; msg: string; x?: number; y?: number }
+export interface DrcIssue { kind: 'clearance' | 'unrouted' | 'edge' | 'courtyard' | 'lvs' | 'warning'; msg: string; x?: number; y?: number }
 
 type Cap = { ax: number; ay: number; bx: number; by: number; r: number } | { rect: [number, number, number, number] };
 interface Obj { net: number; layer: number; cap: Cap; what: string; box: [number, number, number, number] }
@@ -42,9 +43,7 @@ function dist(p: Cap, q: Cap): number {
   return segSegDist([p.ax, p.ay], [p.bx, p.by], [q.ax, q.ay], [q.bx, q.by]) - p.r - q.r;
 }
 
-export function runDrc(board: Board): DrcIssue[] {
-  const s = board.settings;
-  const issues: DrcIssue[] = [];
+function collectObjs(board: Board): Obj[] {
   const objs: Obj[] = [];
   const add = (net: number, layer: number, cap: Cap, what: string) => {
     const box: [number, number, number, number] = 'rect' in cap ? cap.rect
@@ -66,7 +65,91 @@ export function runDrc(board: Board): DrcIssue[] {
     add(t.net, t.layer, { ax: t.pts[i][0], ay: t.pts[i][1], bx: t.pts[i + 1][0], by: t.pts[i + 1][1], r: t.width / 2 }, `track ${board.nets[t.net]?.name}`);
   }
   for (const v of board.vias) for (const L of [0, 1]) add(v.net, L, { ax: v.x, ay: v.y, bx: v.x, by: v.y, r: v.d / 2 }, `via ${board.nets[v.net]?.name}`);
+  return objs;
+}
 
+/**
+ * Layout-vs-schematic: rebuild connectivity purely from copper geometry (pads, tracks, vias, pour)
+ * and compare it with the intended netlist. Reports shorts and opens the router may have produced.
+ */
+export function runLvs(board: Board): DrcIssue[] {
+  const issues: DrcIssue[] = [];
+  const tol = 0.004;
+  const objs = collectObjs(board).filter((o) => o.net > -100);
+  const parent = objs.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const union = (a: number, b: number) => { parent[find(a)] = find(b); };
+  const cell = 2;
+  const grid = new Map<string, number[]>();
+  objs.forEach((o, i) => {
+    for (let gx = Math.floor(o.box[0] / cell); gx <= Math.floor(o.box[2] / cell); gx++)
+      for (let gy = Math.floor(o.box[1] / cell); gy <= Math.floor(o.box[3] / cell); gy++) {
+        const k = `${gx},${gy}`;
+        const a = grid.get(k);
+        if (a) a.push(i); else grid.set(k, [i]);
+      }
+  });
+  for (const idxs of grid.values()) for (let a = 0; a < idxs.length; a++) for (let b = a + 1; b < idxs.length; b++) {
+    const A = objs[idxs[a]], B = objs[idxs[b]];
+    if (A.layer !== B.layer || find(idxs[a]) === find(idxs[b])) continue;
+    if (dist(A.cap, B.cap) <= tol) union(idxs[a], idxs[b]);
+  }
+  // pads of one physical pad on both layers (THT) and via barrels join layers
+  const byPad = new Map<string, number[]>();
+  objs.forEach((o, i) => {
+    const key = o.what.startsWith('via') ? `via${(o.cap as { ax: number }).ax},${(o.cap as { ay: number }).ay}` : o.what.startsWith('pad') ? `${o.what}@${o.box[0].toFixed(3)},${o.box[1].toFixed(3)}` : '';
+    if (!key) return;
+    const a = byPad.get(key) ?? []; a.push(i); byPad.set(key, a);
+  });
+  for (const a of byPad.values()) for (let i = 1; i < a.length; i++) union(a[0], a[i]);
+  // the bottom ground pour joins every ground pad/via that reaches it
+  if (board.pourNet >= 0) {
+    const gnd = objs.map((o, i) => [o, i] as const).filter(([o]) => o.net === board.pourNet && o.layer === 1);
+    for (let i = 1; i < gnd.length; i++) union(gnd[0][1], gnd[i][1]);
+  }
+  // bridged pads (internal connections, e.g. switch legs) are one node by definition
+  const clusters = new Map<number, Set<number>>();
+  objs.forEach((o, i) => { const r = find(i); const s2 = clusters.get(r) ?? new Set<number>(); s2.add(o.net); clusters.set(r, s2); });
+  const netClusters = new Map<number, number>();
+  for (const [r, nets] of clusters) {
+    const real = [...nets].filter((n) => n >= 0);
+    if (real.length > 1) issues.push({ kind: 'lvs', msg: `Short circuit: nets ${real.map((n) => board.nets[n]?.name).join(' + ')} are connected by copper` });
+    for (const n of real) netClusters.set(n, (netClusters.get(n) ?? 0) + (nets.size ? 1 : 0));
+    void r;
+  }
+  // opens: a net whose pads fall into >1 cluster (bridged pads count as joined)
+  const bridged = new Map<string, string[]>();
+  for (const c of board.comps) if (c.fp.bridgedPins) bridged.set(c.ref, c.fp.bridgedPins);
+  for (let n = 0; n < board.nets.length; n++) {
+    const roots = new Set<number>();
+    const bridgeKey = new Map<string, number>();
+    objs.forEach((o, i) => {
+      if (o.net !== n || !o.what.startsWith('pad')) return;
+      const m = o.what.match(/^pad (.+?)\.(.+)$/);
+      const r = find(i);
+      if (m && bridged.get(m[1])?.includes(m[2])) {
+        const k = `${m[1]}.${m[2]}`;
+        const prev = bridgeKey.get(k);
+        if (prev !== undefined) { parent[find(r)] = find(prev); return; }
+        bridgeKey.set(k, r);
+      }
+      roots.add(find(i));
+    });
+    const uniq = new Set([...roots].map((r) => find(r)));
+    if (uniq.size > 1) {
+      const p = board.pads.find((q) => q.net === n);
+      const groups = new Map<number, string[]>();
+      objs.forEach((o, i) => { if (o.net === n && o.what.startsWith('pad')) { const r = find(i); const a = groups.get(r) ?? []; if (!a.includes(o.what.slice(4))) a.push(o.what.slice(4)); groups.set(r, a); } });
+      issues.push({ kind: 'lvs', msg: `Open circuit: net ${board.nets[n].name} is split into ${uniq.size} islands: ${[...groups.values()].map((g) => `[${g.join(' ')}]`).join(' | ')}`, x: p?.x, y: p?.y });
+    }
+  }
+  return issues;
+}
+
+export function runDrc(board: Board): DrcIssue[] {
+  const s = board.settings;
+  const issues: DrcIssue[] = [];
+  const objs = collectObjs(board);
   // spatial hash
   const cell = 2;
   const grid = new Map<string, number[]>();
@@ -108,6 +191,19 @@ export function runDrc(board: Board): DrcIssue[] {
       break;
     }
   }
+  const rects = board.comps.filter((c) => c.fp.body.kind !== 'hole').map((c) => ({ c, r: courtyardRect(c.fp, c.x, c.y, c.rot) }));
+  for (let i = 0; i < rects.length; i++) {
+    const a = rects[i];
+    if (a.r.x0 < -0.01 || a.r.y0 < -0.01 || a.r.x1 > board.width + 0.01 || a.r.y1 > board.height + 0.01) {
+      if (!a.c.fp.edge) issues.push({ kind: 'courtyard', msg: `${a.c.ref} extends past the board edge`, x: a.c.x, y: a.c.y });
+    }
+    for (let j = i + 1; j < rects.length; j++) {
+      const b = rects[j];
+      if (a.r.x0 < b.r.x1 - 0.05 && b.r.x0 < a.r.x1 - 0.05 && a.r.y0 < b.r.y1 - 0.05 && b.r.y0 < a.r.y1 - 0.05)
+        issues.push({ kind: 'courtyard', msg: `${a.c.ref} overlaps ${b.c.ref} (courtyards)`, x: (a.c.x + b.c.x) / 2, y: (a.c.y + b.c.y) / 2 });
+    }
+  }
+  issues.push(...runLvs(board));
   for (const u of board.unrouted) {
     issues.push({ kind: 'unrouted', msg: `Unrouted: ${board.nets[u.net]?.name} near (${u.a[0].toFixed(1)}, ${u.a[1].toFixed(1)})`, x: u.a[0], y: u.a[1] });
   }

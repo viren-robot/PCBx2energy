@@ -77,6 +77,19 @@ export interface DesignNet {
   pins: string[]; // "R1.1", "U1.VCC", "J1.GND"
 }
 
+export interface DesignLabel {
+  ref: string;
+  text: string;
+  /** Optional pin of `ref` the label sits next to (e.g. header pin function). */
+  pin?: string;
+}
+
+export interface DesignStyle {
+  maskColor?: string; // CSS hex, e.g. #000000
+  silkColor?: string;
+  finish?: 'HASL' | 'ENIG';
+}
+
 export interface Design {
   name: string;
   description: string;
@@ -84,6 +97,10 @@ export interface Design {
   components: DesignComponent[];
   nets: DesignNet[];
   notes: string[];
+  /** Silkscreen / schematic labels added by the AI or the user. */
+  labels?: DesignLabel[];
+  /** Board appearance requested by the user ("make the PCB matte black"). */
+  style?: DesignStyle;
 }
 
 // ---------- Physical board ----------

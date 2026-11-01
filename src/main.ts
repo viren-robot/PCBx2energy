@@ -1,21 +1,31 @@
+import type { Session } from '@supabase/supabase-js';
 import './style.css';
 import { generateDesign, MODELS } from './ai';
-import { runDrc, type DrcIssue } from './drc';
+import { adminLogin, deleteCloudDesign, displayName, isAdminSession, listCloudDesigns, saveCloudDesign, sendMagicLink, signOut, supabase } from './cloud';
+import { runDrc, runLvs, type DrcIssue } from './drc';
 import { bomLines, buildFabPackage, FABS, type OutFile } from './export';
+import { FOOTPRINT_IDS, getFootprint, resolvePin } from './footprints';
+import { buildSchematic, schematicDownload, type Schematic } from './schematic';
 import { buildSilk, type Silk } from './silk';
+import { isStyleOnly, parseStyle } from './style';
 import { EXAMPLES, offlineDesign } from './templates';
-import { DEFAULT_SETTINGS, type Board, type Design, type FabId, type Settings } from './types';
+import { DEFAULT_SETTINGS, type Board, type Design, type DesignStyle, type FabId, type Settings } from './types';
+import { DRC_RUNS, REVIEW_PASSES, selfReview, type DrcRun, type ReviewPass } from './verify';
 import { View2D, type Layers2D } from './view2d';
 import { View3D } from './view3d';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const LS = { key: 'pcbx2.apiKey', model: 'pcbx2.model', design: 'pcbx2.design', settings: 'pcbx2.settings', fab: 'pcbx2.fab' };
+const LS = { key: 'pcbx2.apiKey', model: 'pcbx2.model', design: 'pcbx2.design', settings: 'pcbx2.settings', fab: 'pcbx2.fab', theme: 'pcbx2.theme' };
+const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
 // ---------------- state ----------------
 let design: Design | null = null;
 let board: Board | null = null;
 let silk: Silk | null = null;
 let drc: DrcIssue[] = [];
+let schem: Schematic | null = null;
+let session: Session | null = null;
+let cloudId: string | undefined;
 let fab: FabId = (localStorage.getItem(LS.fab) as FabId) || 'jlcpcb';
 let settings: Settings = { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(LS.settings) || '{}') };
 let apiKey = localStorage.getItem(LS.key) || '';
@@ -23,32 +33,52 @@ let model = localStorage.getItem(LS.model) || MODELS[0].id;
 let busy = false;
 let abort: AbortController | null = null;
 let view3dDirty = true;
+let selected: string | null = null;
+const vstate: { reviews: ReviewPass[]; drc: DrcRun[]; running: string; stale: boolean; hasRun: boolean } = { reviews: [], drc: [], running: '', stale: false, hasRun: false };
 
 const view2d = new View2D($<HTMLCanvasElement>('c2d'));
 const view3d = new View3D($('c3d'));
 view2d.onHover = (t) => ($('hover').textContent = t);
 
+// ---------------- theme ----------------
+function setTheme(t: 'dark' | 'light') {
+  document.documentElement.setAttribute('data-theme', t);
+  localStorage.setItem(LS.theme, t);
+  view3d.setTheme(t === 'dark');
+  view2d.draw();
+}
+const curTheme = () => (document.documentElement.getAttribute('data-theme') as 'dark' | 'light') || 'dark';
+const toggleTheme = () => setTheme(curTheme() === 'dark' ? 'light' : 'dark');
+$('btn-theme').onclick = toggleTheme;
+$('a-theme').onclick = toggleTheme;
+view3d.setTheme(curTheme() === 'dark');
+
 // ---------------- worker ----------------
 let worker: Worker | null = null;
 let jobId = 0;
+let rejectJob: ((e: Error) => void) | null = null;
 function getWorker() {
   if (!worker) worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
   return worker;
 }
-function layoutInWorker(d: Design, s: Settings): Promise<Board> {
+function runJob(kind: 'layout' | 'verify', d: Design, s: Settings, onRun?: (r: DrcRun) => void): Promise<{ board: Board }> {
   const id = ++jobId;
   const w = getWorker();
   return new Promise((resolve, reject) => {
+    rejectJob = reject;
+    const done = () => { w.removeEventListener('message', onMsg); rejectJob = null; };
     const onMsg = (e: MessageEvent) => {
       if (e.data.id !== id) return;
-      if (e.data.type === 'progress') { setProgress(e.data.fraction); setStatus(e.data.msg, 'busy'); return; }
-      w.removeEventListener('message', onMsg);
-      if (e.data.type === 'done') resolve(e.data.board as Board);
+      const t = e.data.type;
+      if (t === 'progress') { setProgress(e.data.fraction); setStatus(e.data.msg, 'busy'); return; }
+      if (t === 'run') { onRun?.(e.data.run as DrcRun); return; }
+      done();
+      if (t === 'done') resolve({ board: e.data.board as Board });
       else reject(new Error(e.data.message));
     };
     w.addEventListener('message', onMsg);
-    w.addEventListener('error', (ev) => reject(new Error(ev.message || 'Layout worker crashed')), { once: true });
-    w.postMessage({ id, design: d, settings: s });
+    w.addEventListener('error', (ev) => { done(); reject(new Error(ev.message || 'Layout worker crashed')); }, { once: true });
+    w.postMessage({ id, kind, design: d, settings: s });
   });
 }
 
@@ -64,31 +94,118 @@ function log(html: string) {
   li.innerHTML = `<span class="muted">${new Date().toLocaleTimeString()}</span> ${html}`;
   $('log').prepend(li);
 }
-const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-
 function setBusy(on: boolean) {
   busy = on;
-  $<HTMLButtonElement>('btn-generate').disabled = on;
-  $<HTMLButtonElement>('btn-reroute').disabled = on;
-  $<HTMLButtonElement>('btn-json-apply').disabled = on;
+  for (const id of ['btn-generate', 'btn-reroute', 'btn-json-apply', 'e-add', 'sch-regen']) $<HTMLButtonElement>(id).disabled = on;
   $('btn-cancel').classList.toggle('hidden', !on);
   if (!on) setProgress(0);
 }
-
 function updateAiMode() {
   const el = $('ai-mode');
   if (apiKey) { el.textContent = `AI: ${MODELS.find((m) => m.id === model)?.label.split(' (')[0] ?? model}`; el.className = 'pill ok'; }
-  else { el.textContent = 'Offline templates · add API key for full AI'; el.className = 'pill'; }
+  else { el.textContent = 'Offline mode · add API key for full AI'; el.className = 'pill'; }
+}
+
+// ---------------- auth ----------------
+const authMsg = (t: string, kind: 'err' | 'ok' | '' = '') => { const el = $('a-msg'); el.textContent = t; el.className = `msg ${kind}`; };
+document.querySelectorAll<HTMLButtonElement>('[data-atab]').forEach((b) => (b.onclick = () => {
+  document.querySelectorAll<HTMLButtonElement>('[data-atab]').forEach((x) => x.classList.toggle('active', x === b));
+  $('form-email').classList.toggle('hidden', b.dataset.atab !== 'email');
+  $('form-admin').classList.toggle('hidden', b.dataset.atab !== 'admin');
+  authMsg('');
+}));
+$<HTMLFormElement>('form-email').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $<HTMLButtonElement>('a-send');
+  btn.disabled = true;
+  authMsg('Sending…');
+  try {
+    const sent = await sendMagicLink($<HTMLInputElement>('a-email').value);
+    authMsg(`Sign-in link sent to ${sent}. Open that inbox (check spam) and click the link.`, 'ok');
+    setTimeout(() => (btn.disabled = false), 30_000);
+  } catch (err) {
+    authMsg((err as Error).message, 'err');
+    btn.disabled = false;
+  }
+});
+$<HTMLFormElement>('form-admin').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $<HTMLButtonElement>('a-login');
+  btn.disabled = true;
+  authMsg('Signing in…');
+  try {
+    await adminLogin($<HTMLInputElement>('a-user').value, $<HTMLInputElement>('a-pass').value);
+    authMsg('');
+  } catch (err) { authMsg((err as Error).message, 'err'); }
+  btn.disabled = false;
+});
+$('btn-logout').onclick = async () => { await signOut(); };
+
+let booted = false;
+function applySession(s: Session | null) {
+  session = s;
+  $('auth').classList.toggle('hidden', !!s);
+  $('user-name').textContent = displayName(s);
+  $('admin-badge').classList.toggle('hidden', !isAdminSession(s));
+  $('btn-logout').classList.toggle('hidden', !s);
+  if (s && !booted) { booted = true; bootApp(); }
+  if (s && location.hash.includes('access_token')) history.replaceState(null, '', location.pathname + location.search);
+  if (s) refreshCloud().catch(() => undefined);
+}
+supabase.auth.onAuthStateChange((_ev, s) => applySession(s));
+void supabase.auth.getSession().then(({ data }) => applySession(data.session));
+
+// ---------------- style (colours / finish) ----------------
+function setSelectOrCustom(sel: HTMLSelectElement, hex: string) {
+  if (![...sel.options].some((o) => o.value.toLowerCase() === hex.toLowerCase())) {
+    let o = sel.querySelector<HTMLOptionElement>('option[data-custom]');
+    if (!o) { o = document.createElement('option'); o.dataset.custom = '1'; sel.append(o); }
+    o.value = hex; o.textContent = `Custom ${hex}`;
+  }
+  sel.value = hex;
+}
+function syncStyleControls() {
+  setSelectOrCustom($<HTMLSelectElement>('r-mask'), settings.maskColor);
+  $<HTMLInputElement>('r-maskc').value = settings.maskColor;
+  setSelectOrCustom($<HTMLSelectElement>('r-silk'), settings.silkColor);
+  $<HTMLInputElement>('r-silkc').value = settings.silkColor;
+  $<HTMLSelectElement>('r-finish').value = settings.finish;
+}
+function applyStyle(st: DesignStyle) {
+  if (st.maskColor) settings.maskColor = st.maskColor;
+  if (st.silkColor) settings.silkColor = st.silkColor;
+  if (st.finish) settings.finish = st.finish;
+  localStorage.setItem(LS.settings, JSON.stringify(settings));
+  syncStyleControls();
+  if (design) design.style = { ...design.style, ...st };
+  if (board) {
+    Object.assign(board.settings, { maskColor: settings.maskColor, silkColor: settings.silkColor, finish: settings.finish });
+    silk = buildSilk(board);
+    view2d.silk = silk;
+    view2d.draw();
+    view3dDirty = true;
+    if ($('pane-v3d').classList.contains('active')) refresh3d();
+  }
 }
 
 // ---------------- core flow ----------------
+
 async function generate() {
   if (busy) return;
   const prompt = $<HTMLTextAreaElement>('prompt').value.trim();
   if (!prompt) { setStatus('Type a description first.', 'err'); return; }
   const refine = $<HTMLInputElement>('refine').checked && !!design;
+  // purely cosmetic request on an existing board: restyle instantly, no re-design needed
+  if (design && board && isStyleOnly(prompt)) {
+    const st = parseStyle(prompt);
+    applyStyle(st);
+    log(`<b>Style:</b> ${esc(prompt)} → ${[st.maskColor && `mask ${st.maskColor}`, st.silkColor && `silk ${st.silkColor}`, st.finish].filter(Boolean).join(', ')}`);
+    setStatus('Board colour updated.', 'ok');
+    return;
+  }
   setBusy(true);
   abort = new AbortController();
+  vstate.reviews = []; vstate.drc = []; vstate.stale = false; vstate.hasRun = false; vstate.running = '';
   try {
     let d: Design;
     if (apiKey) {
@@ -100,50 +217,89 @@ async function generate() {
       d = r.design;
       log(`<b>Offline template:</b> ${esc(r.matched)} (from "${esc(prompt)}")`);
     }
-    log(`Circuit: <b>${esc(d.name)}</b> - ${d.components.length} parts, ${d.nets.length} nets`);
+    if (!refine) { cloudId = undefined; for (const c of d.components) { c.x = null; c.y = null; } }
+    // appearance: what the user typed wins over what the AI inferred
+    const st = { ...d.style, ...parseStyle(prompt) };
+    if (st.maskColor || st.silkColor || st.finish) { applyStyle(st); log(`Board style: ${Object.values(st).filter(Boolean).join(' · ')}`); }
+    log(`Circuit: <b>${esc(d.name)}</b> - ${d.components.length} parts, ${d.nets.length} nets, ${(d.labels ?? []).length} labels`);
     for (const n of d.notes ?? []) log(`Note: ${esc(n)}`);
-    await layout(d);
+
+    // --- 3 self-review passes ---
+    vstate.running = 'review'; renderVerify();
+    const rv = await selfReview(d, {
+      apiKey: apiKey || undefined, model, signal: abort.signal,
+      onProgress: (m) => setStatus(m, 'busy'),
+      onPass: (p) => {
+        vstate.reviews.push(p); renderVerify(); setProgress(p.pass / REVIEW_PASSES / 2);
+        log(`Review ${p.pass}/${REVIEW_PASSES} (${p.source === 'ai' ? 'AI' : 'rules'}): ${p.errorsBefore} error(s) → ${p.errorsAfter}${p.fixes.length ? ` · ${esc(p.fixes.join('; '))}` : ''}${p.rejected ? ` · <i>${esc(p.rejected)}</i>` : ''}`);
+      },
+    });
+    d = rv.design;
+    design = d;
+
+    // --- 5 DRC runs (worker) ---
+    await verifyAndShow(d, true);
+    localStorage.setItem(LS.design, JSON.stringify(design));
   } catch (e) {
     setStatus((e as Error).message, 'err');
     log(`<span style="color:var(--danger)">Error:</span> ${esc((e as Error).message)}`);
   } finally {
     abort = null;
+    vstate.running = '';
+    renderVerify();
     setBusy(false);
   }
 }
 
-async function layout(d: Design) {
-  setStatus('Placing and routing…', 'busy');
+/** Run place+route+DRC+LVS 5x in the worker and show the best board. */
+async function verifyAndShow(d: Design, fresh: boolean) {
+  setStatus('Placing, routing and running DRC…', 'busy');
+  vstate.running = 'drc'; vstate.drc = []; renderVerify();
   const t0 = performance.now();
-  const b = await layoutInWorker(d, settings);
+  const r = await runJob('verify', d, settings, (run) => {
+    vstate.drc.push(run); renderVerify();
+    log(`DRC run ${run.run}/${DRC_RUNS}: ${run.errors ? `<span style="color:var(--danger)">${run.errors} issue(s)</span>` : '<b>clean</b>'} · ${run.boardSize} · ${run.ms} ms`);
+  });
   design = d;
-  localStorage.setItem(LS.design, JSON.stringify(d));
-  setBoard(b);
+  vstate.stale = false; vstate.hasRun = true; vstate.running = '';
+  setBoard(r.board, !fresh);
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
-  if (b.unrouted.length) {
-    setStatus(`Done in ${secs}s - ${b.unrouted.length} connection(s) could not be routed.`, 'err');
-    log(`Routed with <b>${b.unrouted.length}</b> unrouted connection(s). Try a bigger board or narrower tracks.`);
-  } else {
-    setStatus(`Done in ${secs}s - fully routed, ready to export.`, 'ok');
-    log(`Layout: ${b.width.toFixed(0)}×${b.height.toFixed(0)} mm, ${b.tracks.length} tracks, ${b.vias.length} vias - <b>100% routed</b>`);
-  }
+  const errs = drc.filter((x) => x.kind !== 'warning').length;
+  if (errs) { setStatus(`Done in ${secs}s - ${errs} DRC issue(s) remain. See Design check.`, 'err'); log(`Finished with <b>${errs}</b> DRC issue(s).`); }
+  else { setStatus(`Done in ${secs}s - passed ${REVIEW_PASSES} reviews and ${DRC_RUNS} DRC runs. Ready to export.`, 'ok'); log(`Layout: ${r.board.width.toFixed(0)}×${r.board.height.toFixed(0)} mm, ${r.board.tracks.length} tracks, ${r.board.vias.length} vias - <b>verified</b>`); }
+  renderVerify();
+}
+
+/** Single quick layout pass (used after manual edits). */
+async function relayout(d: Design, msg?: string) {
+  setStatus(msg ?? 'Re-routing…', 'busy');
+  const r = await runJob('layout', d, settings);
+  design = d;
+  vstate.stale = true;
+  setBoard(r.board, true);
+  const errs = drc.filter((x) => x.kind !== 'warning').length;
+  setStatus(errs ? `Updated - ${errs} issue(s) in Design check.` : 'Updated - no issues. Re-verify runs automatically on export.', errs ? 'err' : 'ok');
+  localStorage.setItem(LS.design, JSON.stringify(d));
+  renderVerify();
 }
 
 function setBoard(b: Board | null, keepView = false) {
   board = b;
-  if (b) b.settings.maskColor = settings.maskColor;
+  if (b) Object.assign(b.settings, { maskColor: settings.maskColor, silkColor: settings.silkColor, finish: settings.finish });
   silk = b ? buildSilk(b) : null;
   drc = b ? runDrc(b) : [];
   view2d.markers = drc.filter((d) => d.kind !== 'warning' && d.x !== undefined).map((d) => ({ x: d.x!, y: d.y! }));
+  view2d.selected = selected && b?.comps.some((c) => c.ref === selected) ? selected : null;
+  if (!view2d.selected) selected = null;
   view2d.setBoard(b, silk, keepView);
   view3dDirty = true;
   if ($('pane-v3d').classList.contains('active')) refresh3d();
-  renderStats();
-  renderDrc();
-  renderBom();
-  renderNets();
+  if ($('pane-sch').classList.contains('active')) renderSchematic();
+  else schem = null;
+  renderStats(); renderDrc(); renderBom(); renderNets(); renderSel();
   $<HTMLTextAreaElement>('json-edit').value = design ? JSON.stringify(design, null, 2) : '';
   for (const id of ['dl-gerber', 'dl-bom', 'dl-pnp', 'dl-all']) $<HTMLButtonElement>(id).disabled = !b;
+  if (b && design) { $<HTMLInputElement>('r-bw').value = String(design.board.width || 0); $<HTMLInputElement>('r-bh').value = String(design.board.height || 0); $<HTMLInputElement>('r-corner').value = String(design.board.cornerRadius ?? 1); }
 }
 
 function refresh3d() {
@@ -151,6 +307,77 @@ function refresh3d() {
   view3dDirty = false;
   view3d.setBoard(board, silk);
 }
+
+// ---------------- editing ----------------
+/** Freeze the current placement and board size into the design so manual edits only change what the user touched. */
+function freeze(d: Design) {
+  if (!board) return;
+  for (const c of board.comps) {
+    const dc = d.components.find((x) => x.ref === c.ref);
+    if (dc) { dc.x = c.x; dc.y = c.y; dc.rotation = c.rot; }
+  }
+  d.board.width = board.width;
+  d.board.height = board.height;
+}
+async function edit(mut: (d: Design) => void, msg: string) {
+  if (!design || !board || busy) return;
+  const d: Design = JSON.parse(JSON.stringify(design));
+  freeze(d);
+  mut(d);
+  setBusy(true);
+  try { await relayout(d, msg); } catch (e) { setStatus((e as Error).message, 'err'); } finally { setBusy(false); }
+}
+view2d.onMove = (ref, x, y) => void edit((d) => { const c = d.components.find((q) => q.ref === ref); if (c) { c.x = x; c.y = y; } }, `Moving ${ref} and re-routing…`);
+view2d.onSelect = (ref) => { selected = ref; renderSel(); };
+view3d.onPick = (ref) => { selected = ref; view2d.selected = ref; view2d.draw(); renderSel(); };
+
+function renderSel() {
+  const c = selected ? board?.comps.find((q) => q.ref === selected) : undefined;
+  $('sel-info').textContent = c ? `${c.ref} · ${c.comp.value} · ${c.fp.id} · (${c.x.toFixed(1)}, ${c.y.toFixed(1)}) ${c.rot}°` : 'Drag a part to move it · click to select';
+  $<HTMLButtonElement>('e-rot').disabled = !c || busy;
+  $<HTMLButtonElement>('e-del').disabled = !c || busy;
+}
+const rotateSel = () => { const ref = selected; if (ref) void edit((d) => { const c = d.components.find((q) => q.ref === ref); if (c) c.rotation = (((c.rotation ?? 0) + 90) % 360); }, `Rotating ${ref}…`); };
+const deleteSel = () => {
+  const ref = selected;
+  if (!ref) return;
+  selected = null;
+  void edit((d) => {
+    d.components = d.components.filter((c) => c.ref !== ref);
+    d.nets = d.nets.map((n) => ({ ...n, pins: n.pins.filter((p) => !p.startsWith(`${ref}.`)) })).filter((n) => n.pins.length > 0);
+    d.labels = (d.labels ?? []).filter((l) => l.ref !== ref);
+  }, `Removing ${ref}…`);
+};
+$('e-rot').onclick = rotateSel;
+$('e-del').onclick = deleteSel;
+const REF_PREFIX = (fp: string) => /^R_/.test(fp) ? 'R' : /^(C_|CP_)/.test(fp) ? 'C' : /^L_/.test(fp) ? 'L' : /^(LED_|D_)/.test(fp) ? 'D' : /^F_/.test(fp) ? 'F' : /^SW_/.test(fp) ? 'SW' : /^Crystal/.test(fp) ? 'Y' : /^(PinHeader|JST|Terminal|USB)/.test(fp) ? 'J' : /^TO-/.test(fp) ? 'Q' : /^Mounting/.test(fp) ? 'H' : /^SOT-23$/.test(fp) ? 'Q' : 'U';
+$('e-add').onclick = () => {
+  const fpId = $<HTMLSelectElement>('e-fp').value;
+  const fp = getFootprint(fpId);
+  if (!fp || !design) return;
+  const value = $<HTMLInputElement>('e-val').value.trim() || fp.id;
+  void edit((d) => {
+    const pre = REF_PREFIX(fp.id);
+    let n = 1;
+    while (d.components.some((c) => c.ref === `${pre}${n}`)) n++;
+    d.components.push({ ref: `${pre}${n}`, footprint: fp.id, value, description: 'Added manually', manufacturer: '', mpn: '', lcsc: '', x: d.board.width / 2, y: d.board.height / 2, rotation: 0 });
+    selected = `${pre}${n}`;
+  }, 'Adding part…');
+};
+window.addEventListener('keydown', (e) => {
+  if (!$('pane-v2d').classList.contains('active') || !selected || busy) return;
+  const t = e.target as HTMLElement;
+  if (/INPUT|TEXTAREA|SELECT/.test(t.tagName)) return;
+  if (e.key === 'r' || e.key === 'R') { e.preventDefault(); rotateSel(); }
+  else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSel(); }
+  else if (e.key === 'Escape') { selected = null; view2d.selected = null; view2d.draw(); renderSel(); }
+  else if (e.key.startsWith('Arrow')) {
+    e.preventDefault();
+    const step = e.shiftKey ? 2 : 0.5, ref = selected;
+    const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0, dy = e.key === 'ArrowDown' ? -step : e.key === 'ArrowUp' ? step : 0;
+    void edit((d) => { const c = d.components.find((q) => q.ref === ref); if (c) { c.x = (c.x ?? 0) + dx; c.y = (c.y ?? 0) + dy; } }, `Nudging ${ref}…`);
+  }
+});
 
 // ---------------- panels ----------------
 function renderStats() {
@@ -168,6 +395,7 @@ function renderStats() {
     ['Nets', String(b.nets.length)],
     ['Tracks', `${b.tracks.length} · ${(len / 10).toFixed(1)} cm`],
     ['Vias', String(b.vias.length)],
+    ['Labels', String((b.design.labels ?? []).length)],
     ['Routed', b.unrouted.length ? `${b.unrouted.length} unrouted` : '100 %'],
   ];
   el.className = 'stats';
@@ -184,16 +412,52 @@ function renderDrc() {
   if (board && !errors.length) {
     const li = document.createElement('li');
     li.className = 'good';
-    li.textContent = `All connections routed, no clearance violations (${board.settings.clearance} mm).`;
+    li.textContent = `Clean: all connections routed, copper matches the netlist (no shorts/opens), clearance ≥ ${board.settings.clearance} mm.`;
     ul.append(li);
   }
   for (const d of drc) {
     const li = document.createElement('li');
-    li.className = d.kind;
+    li.className = d.kind === 'lvs' || d.kind === 'courtyard' ? 'clearance' : d.kind;
     li.textContent = d.msg;
     if (d.x !== undefined) li.onclick = () => { activateTab('v2d'); view2d.markers = [{ x: d.x!, y: d.y! }]; view2d.draw(); };
     ul.append(li);
   }
+}
+
+function renderVerify() {
+  const el = $('verify');
+  const pill = $('verify-pill');
+  const okDrc = vstate.drc.length === DRC_RUNS && vstate.drc.every((r) => r.errors === 0);
+  const verified = vstate.hasRun && !vstate.stale && vstate.reviews.length >= REVIEW_PASSES && okDrc;
+  pill.textContent = vstate.running ? 'running…' : vstate.stale ? 'stale' : verified ? 'verified ✓' : vstate.hasRun ? 'issues' : '';
+  pill.className = `pill ${vstate.running ? '' : vstate.stale ? '' : verified ? 'ok' : vstate.hasRun ? 'bad' : ''}`;
+  if (!vstate.reviews.length && !vstate.drc.length && !vstate.running) { el.innerHTML = '<div class="muted small">AI review ×3 and DRC ×5 run after every generation.</div>'; return; }
+  const rows: string[] = [];
+  for (let i = 1; i <= REVIEW_PASSES; i++) {
+    const r = vstate.reviews[i - 1];
+    rows.push(r
+      ? `<div class="vstep ${r.errorsAfter ? 'bad' : 'ok'}">Review ${i}/${REVIEW_PASSES} · ${r.source === 'ai' ? 'AI' : 'rules'}<small>${r.errorsBefore} → ${r.errorsAfter} error(s)${r.fixes.length ? ` · ${r.fixes.length} fix(es)` : ''}${r.rejected ? ' · edit rejected' : ''}</small></div>`
+      : `<div class="vstep ${vstate.running === 'review' && vstate.reviews.length === i - 1 ? 'run' : ''}">Review ${i}/${REVIEW_PASSES}<small>${vstate.running === 'review' && vstate.reviews.length === i - 1 ? 'running…' : 'pending'}</small></div>`);
+  }
+  for (let i = 1; i <= DRC_RUNS; i++) {
+    const r = vstate.drc[i - 1];
+    rows.push(r
+      ? `<div class="vstep ${r.errors ? 'bad' : 'ok'}">DRC run ${i}/${DRC_RUNS}<small>${r.errors ? `${r.errors} issue(s): ${esc(r.messages[0] ?? '')}` : 'clean'} · ${r.boardSize}</small></div>`
+      : `<div class="vstep ${vstate.running === 'drc' && vstate.drc.length === i - 1 ? 'run' : ''}">DRC run ${i}/${DRC_RUNS}<small>${vstate.running === 'drc' && vstate.drc.length === i - 1 ? 'running…' : 'pending'}</small></div>`);
+  }
+  el.innerHTML = rows.join('') + (vstate.stale ? '<div class="muted small" style="margin:6px 0">Edited since the last check. <button class="ghost sm" id="v-rerun">Re-run 5× DRC</button></div>' : '');
+  const b = document.getElementById('v-rerun');
+  if (b) b.onclick = () => void reverify();
+}
+async function reverify(): Promise<boolean> {
+  if (!design || busy) return false;
+  setBusy(true);
+  try {
+    const d: Design = JSON.parse(JSON.stringify(design));
+    freeze(d);
+    await verifyAndShow(d, false);
+    return drc.filter((x) => x.kind !== 'warning').length === 0;
+  } catch (e) { setStatus((e as Error).message, 'err'); return false; } finally { setBusy(false); }
 }
 
 function renderBom() {
@@ -224,14 +488,15 @@ function renderBom() {
       }
       if (design) localStorage.setItem(LS.design, JSON.stringify(design));
       $<HTMLTextAreaElement>('json-edit').value = JSON.stringify(design, null, 2);
-      if (f === 'value') { silk = board ? buildSilk(board) : null; view3dDirty = true; }
+      if (f === 'value') { silk = board ? buildSilk(board) : null; view3dDirty = true; schem = null; }
     });
   });
 }
 
+/** Netlist tab doubles as a net editor: remove pins, add pins, create nets. */
 function renderNets() {
   const el = $('net-table');
-  if (!board) { el.innerHTML = '<p class="muted">No design yet.</p>'; return; }
+  if (!board || !design) { el.innerHTML = '<p class="muted">No design yet.</p>'; return; }
   const pins = new Map<number, string[]>();
   for (const p of board.pads) if (p.net >= 0) {
     const a = pins.get(p.net) ?? [];
@@ -239,10 +504,44 @@ function renderNets() {
     if (!a.includes(k)) a.push(k);
     pins.set(p.net, a);
   }
-  el.innerHTML = `<table><thead><tr><th>Net</th><th>Class</th><th>Width</th><th>Pins</th></tr></thead><tbody>
-    ${board.nets.map((n, i) => `<tr><td><b>${esc(n.name)}</b></td><td>${n.isGround ? 'Ground' : n.isPower ? 'Power' : 'Signal'}</td><td>${n.width} mm</td>
-      <td class="mono">${esc((pins.get(i) ?? []).join('  '))}</td></tr>`).join('')}
+  el.innerHTML = `<p class="muted small">Edit connectivity: remove a pin with ×, add <code>REF.PIN</code> (e.g. <code>U1.IO4</code>) to a net, or create a new net. The board re-routes automatically.</p>
+  <table><thead><tr><th>Net</th><th>Class</th><th>Pins</th></tr></thead><tbody>
+    ${board.nets.map((n, i) => `<tr data-net="${esc(n.name)}"><td><b>${esc(n.name)}</b><div class="muted small">${n.width} mm</div></td><td>${n.isGround ? 'Ground' : n.isPower ? 'Power' : 'Signal'}</td>
+      <td><div class="chips">${(pins.get(i) ?? []).map((p) => `<span class="chip">${esc(p)}<button data-rm="${esc(p)}" title="Remove from net">×</button></span>`).join('')}
+      <input class="addpin" placeholder="+ REF.PIN" data-add="${esc(n.name)}" /></div></td></tr>`).join('')}
+    <tr><td><input class="addpin" id="newnet-name" placeholder="new net name" /></td><td></td><td><input class="addpin" id="newnet-pin" placeholder="first REF.PIN" /></td></tr>
     </tbody></table>`;
+  el.querySelectorAll<HTMLButtonElement>('[data-rm]').forEach((b) => (b.onclick = () => {
+    const pin = b.dataset.rm!, net = (b.closest('tr') as HTMLElement).dataset.net!;
+    void edit((d) => { const n = d.nets.find((q) => q.name === net); if (n) { const [ref, id] = pin.split('.'); const fp = getFootprint(d.components.find((c) => c.ref === ref)?.footprint ?? ''); n.pins = n.pins.filter((p) => { const [r, i] = p.split('.'); return !(r === ref && (i === id || (fp && resolvePin(fp, i) === id))); }); } d.nets = d.nets.filter((q) => q.pins.length); }, `Disconnecting ${pin}…`);
+  }));
+  const addPin = (net: string, raw: string): string | null => {
+    const m = raw.trim().match(/^([^.\s]+)\.(.+)$/);
+    if (!m || !design) return 'Use the form REF.PIN, e.g. U1.IO4';
+    const c = design.components.find((q) => q.ref.toLowerCase() === m[1].toLowerCase());
+    if (!c) return `No component ${m[1]}`;
+    const fp = getFootprint(c.footprint);
+    if (!fp || !resolvePin(fp, m[2])) return `${c.ref} (${c.footprint}) has no pin "${m[2]}"`;
+    void edit((d) => {
+      const id = resolvePin(fp, m[2])!;
+      for (const n of d.nets) n.pins = n.pins.filter((p) => { const [r, i] = p.split('.'); return !(r === c.ref && resolvePin(fp, i) === id); });
+      const t = d.nets.find((q) => q.name.toLowerCase() === net.toLowerCase());
+      if (t) t.pins.push(`${c.ref}.${m[2]}`); else d.nets.push({ name: net, pins: [`${c.ref}.${m[2]}`] });
+      d.nets = d.nets.filter((q) => q.pins.length);
+    }, `Connecting ${c.ref}.${m[2]} to ${net}…`);
+    return null;
+  };
+  el.querySelectorAll<HTMLInputElement>('[data-add]').forEach((inp) => inp.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !inp.value.trim()) return;
+    const err = addPin(inp.dataset.add!, inp.value);
+    if (err) { inp.style.borderColor = 'var(--danger)'; inp.title = err; setStatus(err, 'err'); }
+  }));
+  const nn = $<HTMLInputElement>('newnet-name'), np = $<HTMLInputElement>('newnet-pin');
+  np.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !nn.value.trim() || !np.value.trim()) return;
+    const err = addPin(nn.value.trim(), np.value);
+    if (err) setStatus(err, 'err');
+  });
 }
 
 function renderFab() {
@@ -256,7 +555,65 @@ function renderFab() {
   $('dl-pnp').textContent = fab === 'jlcpcb' ? '⬇ CPL / pick & place (.csv)' : fab === 'pcbway' ? '⬇ Centroid file (.csv)' : '⬇ Pick & place (.csv)';
 }
 
-// ---------------- downloads ----------------
+// ---------------- schematic ----------------
+let schVb = { x: 0, y: 0, w: 100, h: 100 };
+function renderSchematic() {
+  const wrap = $('sch-wrap');
+  if (!board) { wrap.innerHTML = '<p class="muted" style="padding:16px">No board yet.</p>'; return; }
+  schem = buildSchematic(board);
+  wrap.innerHTML = schem.svg;
+  const svg = wrap.querySelector('svg')!;
+  svg.removeAttribute('width'); svg.removeAttribute('height');
+  schVb = { x: 0, y: 0, w: schem.width, h: schem.height };
+  fitSchematic();
+  const lvs = runLvs(board);
+  $('sch-info').textContent = `${schem.symbols} symbols · ${board.nets.length} nets · PCB ↔ schematic: ${lvs.length ? `${lvs.length} mismatch(es)` : 'match ✓ (no shorts/opens)'}`;
+  svg.addEventListener('click', (e) => {
+    const t = e.target as Element;
+    const net = t.closest('[data-net]')?.getAttribute('data-net');
+    svg.querySelectorAll('.hl').forEach((x) => x.classList.remove('hl'));
+    if (net) svg.querySelectorAll(`[data-net="${net}"]`).forEach((x) => x.classList.add('hl'));
+    const sym = t.closest('[data-ref]')?.getAttribute('data-ref');
+    if (sym) { selected = sym; view2d.selected = sym; view2d.draw(); renderSel(); svg.querySelectorAll('.sel').forEach((x) => x.classList.remove('sel')); t.closest('[data-ref]')!.classList.add('sel'); }
+  });
+}
+function applySchVb() { const svg = $('sch-wrap').querySelector('svg'); if (svg) svg.setAttribute('viewBox', `${schVb.x} ${schVb.y} ${schVb.w} ${schVb.h}`); }
+function fitSchematic() {
+  if (!schem) return;
+  const wrap = $('sch-wrap');
+  const ar = wrap.clientWidth / Math.max(1, wrap.clientHeight);
+  const w = Math.max(schem.width, schem.height * ar), h = w / ar;
+  schVb = { x: (schem.width - w) / 2, y: 0, w, h };
+  applySchVb();
+}
+{
+  const wrap = $('sch-wrap');
+  let drag: { x: number; y: number; vx: number; vy: number } | null = null;
+  wrap.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const r = wrap.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
+    const f = Math.exp(e.deltaY * 0.0015);
+    const nw = schVb.w * f, nh = schVb.h * f;
+    schVb = { x: schVb.x + (schVb.w - nw) * px, y: schVb.y + (schVb.h - nh) * py, w: nw, h: nh };
+    applySchVb();
+  }, { passive: false });
+  wrap.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, vx: schVb.x, vy: schVb.y }; });
+  wrap.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const r = wrap.getBoundingClientRect();
+    schVb.x = drag.vx - ((e.clientX - drag.x) / r.width) * schVb.w;
+    schVb.y = drag.vy - ((e.clientY - drag.y) / r.height) * schVb.h;
+    applySchVb();
+  });
+  window.addEventListener('pointerup', () => (drag = null));
+  wrap.addEventListener('dblclick', fitSchematic);
+}
+$('sch-regen').onclick = () => { renderSchematic(); log('Schematic regenerated from the current PCB.'); };
+$('sch-fit').onclick = fitSchematic;
+$('sch-dl').onclick = () => { if (schem) download({ name: `${(board?.design.name ?? 'board').replace(/\W+/g, '_')}_schematic.svg`, content: schematicDownload(schem, curTheme() === 'dark'), mime: 'image/svg+xml' }); };
+
+// ---------------- downloads / export ----------------
 function download(f: OutFile) {
   const blob = new Blob([f.content as BlobPart], { type: f.mime });
   const a = document.createElement('a');
@@ -268,13 +625,54 @@ function download(f: OutFile) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 async function exportFile(which: 'gerberZip' | 'bom' | 'pnp' | 'all') {
+  if (!board || !design || busy) return;
+  // Every export re-runs the 5x DRC on the current design first.
+  const ok = await reverify();
   if (!board) return;
-  const errs = drc.filter((d) => d.kind === 'clearance' || d.kind === 'unrouted' || d.kind === 'edge').length;
-  if (errs && which !== 'bom' && !confirm(`The design check reports ${errs} issue(s). Export anyway?`)) return;
+  const errs = drc.filter((d) => d.kind !== 'warning').length;
+  if (!ok && errs && !confirm(`DRC still reports ${errs} issue(s). Export anyway?`)) return;
   const pkg = await buildFabPackage(board, fab);
   download(pkg[which]);
   log(`Exported <b>${esc(pkg[which].name)}</b> for ${FABS[fab].name}`);
 }
+
+// ---------------- cloud ----------------
+async function refreshCloud() {
+  const list = $('cloud-list');
+  if (!session) return;
+  const admin = isAdminSession(session);
+  $('cloud-info').textContent = admin ? 'Admin: you can see and manage every user’s designs.' : 'Your saved designs.';
+  try {
+    const rows = await listCloudDesigns();
+    list.innerHTML = rows.length
+      ? `<table><thead><tr><th>Name</th>${admin ? '<th>Owner</th>' : ''}<th>Parts</th><th>Updated</th><th></th></tr></thead><tbody>${rows.map((r) => `<tr><td><b>${esc(r.name)}</b></td>${admin ? `<td class="mono">${esc(r.owner.slice(0, 8))}</td>` : ''}<td>${r.design.components?.length ?? 0}</td><td>${new Date(r.updated_at).toLocaleString()}</td><td><button class="ghost sm" data-open="${r.id}">Open</button> <button class="ghost sm" data-del="${r.id}">Delete</button></td></tr>`).join('')}</tbody></table>`
+      : '<p class="muted">Nothing saved yet. Generate a board and press “Save current design”.</p>';
+    list.querySelectorAll<HTMLButtonElement>('[data-open]').forEach((b) => (b.onclick = async () => {
+      const r = rows.find((x) => x.id === b.dataset.open);
+      if (!r || busy) return;
+      cloudId = r.id;
+      if (r.settings) { settings = { ...settings, ...r.settings }; syncStyleControls(); }
+      setBusy(true);
+      try { await verifyAndShow(r.design, true); activateTab('v2d'); log(`Opened <b>${esc(r.name)}</b> from the cloud.`); } catch (e) { setStatus((e as Error).message, 'err'); } finally { setBusy(false); }
+    }));
+    list.querySelectorAll<HTMLButtonElement>('[data-del]').forEach((b) => (b.onclick = async () => {
+      if (!confirm('Delete this design?')) return;
+      try { await deleteCloudDesign(b.dataset.del!); if (cloudId === b.dataset.del) cloudId = undefined; await refreshCloud(); } catch (e) { setStatus((e as Error).message, 'err'); }
+    }));
+  } catch (e) { list.innerHTML = `<p style="color:var(--danger)">${esc((e as Error).message)}</p>`; }
+}
+$('cloud-refresh').onclick = () => void refreshCloud();
+$('cloud-save').onclick = async () => {
+  if (!design) { setStatus('Nothing to save yet.', 'err'); return; }
+  try {
+    const d: Design = JSON.parse(JSON.stringify(design));
+    freeze(d);
+    cloudId = await saveCloudDesign(d, settings, cloudId);
+    log(`Saved <b>${esc(d.name)}</b> to the cloud.`);
+    setStatus('Saved to your cloud designs.', 'ok');
+    await refreshCloud();
+  } catch (e) { setStatus((e as Error).message, 'err'); }
+};
 
 // ---------------- tabs ----------------
 function activateTab(name: string) {
@@ -283,9 +681,11 @@ function activateTab(name: string) {
   view3d.setActive(name === 'v3d');
   if (name === 'v3d') refresh3d();
   if (name === 'v2d') view2d.resize();
+  if (name === 'sch') renderSchematic();
+  if (name === 'cloud') void refreshCloud();
 }
 
-// ---------------- settings ----------------
+// ---------------- rules ----------------
 function loadRules() {
   $<HTMLInputElement>('r-track').value = String(settings.trackWidth);
   $<HTMLInputElement>('r-power').value = String(settings.powerTrackWidth);
@@ -293,9 +693,8 @@ function loadRules() {
   $<HTMLInputElement>('r-via').value = String(settings.viaDiameter);
   $<HTMLInputElement>('r-drill').value = String(settings.viaDrill);
   $<HTMLSelectElement>('r-thick').value = String(settings.thickness);
-  $<HTMLSelectElement>('r-finish').value = settings.finish;
-  $<HTMLSelectElement>('r-mask').value = settings.maskColor;
   $<HTMLInputElement>('r-pour').checked = settings.groundPour;
+  syncStyleControls();
 }
 function readRules() {
   const num = (id: string, min: number, def: number) => { const v = parseFloat($<HTMLInputElement>(id).value); return Number.isFinite(v) && v >= min ? v : def; };
@@ -307,8 +706,6 @@ function readRules() {
     viaDiameter: num('r-via', 0.45, 0.6),
     viaDrill: num('r-drill', 0.2, 0.3),
     thickness: parseFloat($<HTMLSelectElement>('r-thick').value),
-    finish: $<HTMLSelectElement>('r-finish').value as 'HASL' | 'ENIG',
-    maskColor: $<HTMLSelectElement>('r-mask').value,
     groundPour: $<HTMLInputElement>('r-pour').checked,
   };
   if (settings.viaDrill > settings.viaDiameter - 0.2) settings.viaDrill = Math.max(0.2, settings.viaDiameter - 0.3);
@@ -323,10 +720,12 @@ for (const ex of EXAMPLES) {
   b.onclick = () => { $<HTMLTextAreaElement>('prompt').value = ex.prompt; $<HTMLInputElement>('refine').checked = false; };
   $('examples').append(b);
 }
+$<HTMLSelectElement>('e-fp').innerHTML = FOOTPRINT_IDS.map((f) => `<option>${f}</option>`).join('');
 $('btn-generate').onclick = generate;
 $('prompt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) generate(); });
 $('btn-cancel').onclick = () => {
   abort?.abort();
+  rejectJob?.(new Error('Cancelled.'));
   if (worker) { worker.terminate(); worker = null; }
   setBusy(false);
   setStatus('Cancelled.', 'idle');
@@ -334,27 +733,28 @@ $('btn-cancel').onclick = () => {
 $('btn-reroute').onclick = async () => {
   if (!design || busy) return;
   readRules();
+  const d: Design = JSON.parse(JSON.stringify(design));
+  freeze(d);
+  const bw = parseFloat($<HTMLInputElement>('r-bw').value), bh = parseFloat($<HTMLInputElement>('r-bh').value), cr = parseFloat($<HTMLInputElement>('r-corner').value);
+  if (Number.isFinite(bw) && Number.isFinite(bh)) { d.board.width = Math.max(0, bw); d.board.height = Math.max(0, bh); }
+  if (Number.isFinite(cr)) d.board.cornerRadius = Math.max(0, cr);
   setBusy(true);
-  try { await layout(design); } catch (e) { setStatus((e as Error).message, 'err'); } finally { setBusy(false); }
+  try { await verifyAndShow(d, false); } catch (e) { setStatus((e as Error).message, 'err'); } finally { setBusy(false); }
 };
-for (const id of ['r-mask', 'r-finish', 'r-thick']) $(id).addEventListener('change', () => {
-  readRules();
-  if (board) { board.settings.maskColor = settings.maskColor; board.settings.finish = settings.finish; board.settings.thickness = settings.thickness; view3dDirty = true; if ($('pane-v3d').classList.contains('active')) refresh3d(); }
-});
-for (const id of ['r-track', 'r-power', 'r-clear', 'r-via', 'r-drill', 'r-pour']) $(id).addEventListener('change', () => { readRules(); log('Design rules changed - press <b>Re-place &amp; re-route</b> to apply.'); });
+$('r-mask').addEventListener('change', () => applyStyle({ maskColor: $<HTMLSelectElement>('r-mask').value }));
+$('r-maskc').addEventListener('input', () => applyStyle({ maskColor: $<HTMLInputElement>('r-maskc').value }));
+$('r-silk').addEventListener('change', () => applyStyle({ silkColor: $<HTMLSelectElement>('r-silk').value }));
+$('r-silkc').addEventListener('input', () => applyStyle({ silkColor: $<HTMLInputElement>('r-silkc').value }));
+$('r-finish').addEventListener('change', () => applyStyle({ finish: $<HTMLSelectElement>('r-finish').value as 'HASL' | 'ENIG' }));
+$('r-thick').addEventListener('change', () => { readRules(); if (board) { board.settings.thickness = settings.thickness; view3dDirty = true; if ($('pane-v3d').classList.contains('active')) refresh3d(); } });
+for (const id of ['r-track', 'r-power', 'r-clear', 'r-via', 'r-drill', 'r-pour', 'r-bw', 'r-bh', 'r-corner']) $(id).addEventListener('change', () => { readRules(); log('Rules changed - press <b>Apply &amp; re-route</b>.'); });
 
 document.querySelectorAll<HTMLButtonElement>('.tab').forEach((t) => (t.onclick = () => activateTab(t.dataset.tab!)));
 document.querySelectorAll<HTMLButtonElement>('.fab-picker .seg').forEach((b) => (b.onclick = () => {
   const prev = fab;
   fab = b.dataset.fab as FabId;
   localStorage.setItem(LS.fab, fab);
-  // switch to the fab's signature mask colour if the user was on the previous default
-  if (settings.maskColor === FABS[prev].defaultMask && FABS[fab].defaultMask !== settings.maskColor) {
-    settings.maskColor = FABS[fab].defaultMask;
-    $<HTMLSelectElement>('r-mask').value = settings.maskColor;
-    readRules();
-    if (board) { board.settings.maskColor = settings.maskColor; view3dDirty = true; if ($('pane-v3d').classList.contains('active')) refresh3d(); }
-  }
+  if (settings.maskColor === FABS[prev].defaultMask && FABS[fab].defaultMask !== settings.maskColor) applyStyle({ maskColor: FABS[fab].defaultMask });
   renderFab();
 }));
 document.querySelectorAll<HTMLInputElement>('[data-layer]').forEach((c) => c.addEventListener('change', () => {
@@ -368,11 +768,13 @@ $('btn-png2d').onclick = () => { const a = document.createElement('a'); a.href =
 $('btn-png3d').onclick = () => { const a = document.createElement('a'); a.href = view3d.snapshot(); a.download = `${pngName()}_3d.png`; a.click(); };
 document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) => (b.onclick = () => view3d.view(b.dataset.view as 'iso' | 'top' | 'bottom')));
 $<HTMLInputElement>('show-comps').addEventListener('change', (e) => view3d.showComponents((e.target as HTMLInputElement).checked));
+$<HTMLInputElement>('xray').addEventListener('change', (e) => view3d.setXray((e.target as HTMLInputElement).checked));
+$<HTMLInputElement>('autorot').addEventListener('change', (e) => view3d.setAutoRotate((e.target as HTMLInputElement).checked));
 
-$('dl-gerber').onclick = () => exportFile('gerberZip');
-$('dl-bom').onclick = () => exportFile('bom');
-$('dl-pnp').onclick = () => exportFile('pnp');
-$('dl-all').onclick = () => exportFile('all');
+$('dl-gerber').onclick = () => void exportFile('gerberZip');
+$('dl-bom').onclick = () => void exportFile('bom');
+$('dl-pnp').onclick = () => void exportFile('pnp');
+$('dl-all').onclick = () => void exportFile('all');
 
 $('btn-json-apply').onclick = async () => {
   if (busy) return;
@@ -385,7 +787,7 @@ $('btn-json-apply').onclick = async () => {
   d.description ??= '';
   for (const c of d.components) { c.value ??= ''; c.description ??= ''; c.manufacturer ??= ''; c.mpn ??= ''; c.lcsc ??= ''; }
   setBusy(true);
-  try { await layout(d); log('Applied edited design JSON.'); } catch (e) { setStatus((e as Error).message, 'err'); } finally { setBusy(false); }
+  try { await verifyAndShow(d, true); log('Applied edited design JSON.'); } catch (e) { setStatus((e as Error).message, 'err'); } finally { setBusy(false); }
 };
 $('btn-json-load').onclick = () => $<HTMLInputElement>('json-file').click();
 $<HTMLInputElement>('json-file').addEventListener('change', async (e) => {
@@ -419,13 +821,17 @@ loadRules();
 renderFab();
 updateAiMode();
 setBoard(null);
-const saved = localStorage.getItem(LS.design);
-if (saved) {
-  try {
-    const d = JSON.parse(saved) as Design;
-    setBusy(true);
-    layout(d).then(() => log('Restored your last design.')).catch(() => undefined).finally(() => setBusy(false));
-  } catch { /* ignore */ }
-} else {
+renderVerify();
+
+function bootApp() {
+  const saved = localStorage.getItem(LS.design);
+  if (saved) {
+    try {
+      const d = JSON.parse(saved) as Design;
+      setBusy(true);
+      relayout(d, 'Restoring your last design…').then(() => { vstate.stale = false; vstate.hasRun = false; renderVerify(); log('Restored your last design (press “Re-run 5× DRC” or export to verify).'); }).catch(() => undefined).finally(() => setBusy(false));
+      return;
+    } catch { /* ignore */ }
+  }
   $<HTMLTextAreaElement>('prompt').value = EXAMPLES[2].prompt;
 }

@@ -21,6 +21,12 @@ export class View2D {
   private dpr = 1;
   onHover?: (text: string) => void;
   flipped = false;
+  /** Editing: set by the app. */
+  selected: string | null = null;
+  editable = true;
+  onSelect?: (ref: string | null) => void;
+  onMove?: (ref: string, x: number, y: number) => void;
+  private ghost: { ref: string; x: number; y: number; dx: number; dy: number } | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d')!;
@@ -37,7 +43,19 @@ export class View2D {
       this.draw();
     }, { passive: false });
     canvas.addEventListener('pointerdown', (e) => {
-      this.drag = { x: e.clientX, y: e.clientY, ox: this.ox, oy: this.oy };
+      const r = canvas.getBoundingClientRect();
+      const pt = this.toBoard((e.clientX - r.left) * this.dpr, (e.clientY - r.top) * this.dpr);
+      const hit = this.editable && e.button === 0 ? this.compAt(pt.x, pt.y) : undefined;
+      if (hit) {
+        this.selected = hit.ref;
+        this.onSelect?.(hit.ref);
+        this.ghost = { ref: hit.ref, x: hit.x, y: hit.y, dx: hit.x - pt.x, dy: hit.y - pt.y };
+        this.moved = false;
+        this.drag = null;
+        this.draw();
+      } else {
+        this.drag = { x: e.clientX, y: e.clientY, ox: this.ox, oy: this.oy };
+      }
       canvas.setPointerCapture(e.pointerId);
     });
     canvas.addEventListener('pointermove', (e) => {
@@ -48,15 +66,31 @@ export class View2D {
         this.draw();
       }
       this.hover = this.toBoard((e.clientX - r.left) * this.dpr, (e.clientY - r.top) * this.dpr);
+      if (this.ghost) {
+        const nx = Math.round((this.hover.x + this.ghost.dx) * 2) / 2, ny = Math.round((this.hover.y + this.ghost.dy) * 2) / 2;
+        if (nx !== this.ghost.x || ny !== this.ghost.y) { this.ghost.x = nx; this.ghost.y = ny; this.moved = true; this.draw(); }
+      }
       this.reportHover();
     });
     canvas.addEventListener('pointerup', (e) => {
+      if (this.ghost) {
+        const g = this.ghost;
+        this.ghost = null;
+        if (this.moved) this.onMove?.(g.ref, g.x, g.y);
+        else {
+          const p = this.hover ? this.padAt(this.hover.x, this.hover.y) : undefined;
+          this.highlight = p && p.net !== this.highlight ? p.net : -1;
+        }
+        this.draw();
+        return;
+      }
       const moved = this.drag && Math.hypot(e.clientX - this.drag.x, e.clientY - this.drag.y) > 3;
       this.drag = null;
       if (!moved && this.board && this.hover) {
         const p = this.padAt(this.hover.x, this.hover.y);
         const t = p ? p.net : this.trackNetAt(this.hover.x, this.hover.y);
         this.highlight = t === this.highlight ? -1 : t;
+        if (t < 0 && this.selected) { this.selected = null; this.onSelect?.(null); }
         this.draw();
       }
     });
@@ -72,6 +106,7 @@ export class View2D {
 
   resize() {
     const p = this.canvas.parentElement!;
+    if (p.clientWidth < 80 || p.clientHeight < 80) return; // hidden tab: keep the last good size
     this.dpr = window.devicePixelRatio || 1;
     this.canvas.width = Math.max(10, p.clientWidth * this.dpr);
     this.canvas.height = Math.max(10, p.clientHeight * this.dpr);
@@ -83,7 +118,7 @@ export class View2D {
   fit() {
     if (!this.board) { this.draw(); return; }
     const pad = 40 * this.dpr;
-    this.scale = Math.min((this.canvas.width - 2 * pad) / this.board.width, (this.canvas.height - 2 * pad) / this.board.height);
+    this.scale = Math.max(1, Math.min((this.canvas.width - 2 * pad) / this.board.width, (this.canvas.height - 2 * pad) / this.board.height));
     this.ox = (this.canvas.width - this.board.width * this.scale) / 2;
     this.oy = (this.canvas.height - this.board.height * this.scale) / 2;
     this.draw();
@@ -96,6 +131,18 @@ export class View2D {
     return { x, y: this.board.height - (py - this.oy) / this.scale };
   }
 
+  private moved = false;
+  private compAt(x: number, y: number) {
+    if (!this.board) return undefined;
+    let best: { ref: string; x: number; y: number; a: number } | undefined;
+    for (const c of this.board.comps) {
+      const r = courtyardRect(c.fp, c.x, c.y, c.rot);
+      if (x < r.x0 || x > r.x1 || y < r.y0 || y > r.y1) continue;
+      const a = (r.x1 - r.x0) * (r.y1 - r.y0);
+      if (!best || a < best.a) best = { ref: c.ref, x: c.x, y: c.y, a };
+    }
+    return best;
+  }
   private padAt(x: number, y: number): WorldPad | undefined {
     return this.board?.pads.find((p) => Math.abs(p.x - x) <= p.w / 2 && Math.abs(p.y - y) <= p.h / 2);
   }
@@ -131,11 +178,14 @@ export class View2D {
     const ctx = this.ctx;
     const { width, height } = this.canvas;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#0d1117';
+    const css = getComputedStyle(document.documentElement);
+    const bg = css.getPropertyValue('--canvas-bg').trim() || '#0d1117';
+    const fg = css.getPropertyValue('--canvas-fg').trim() || '#6e7681';
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, width, height);
     const b = this.board;
     if (!b) {
-      ctx.fillStyle = '#6e7681';
+      ctx.fillStyle = fg;
       ctx.font = `${14 * this.dpr}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
       ctx.fillText('Describe a circuit on the left and press Generate', width / 2, height / 2);
@@ -147,7 +197,7 @@ export class View2D {
     // substrate
     ctx.beginPath();
     roundedRectPath(ctx, 0, 0, b.width, b.height, b.cornerRadius);
-    ctx.fillStyle = '#10261a';
+    ctx.fillStyle = shade(b.settings.maskColor, 0.42);
     ctx.fill();
     const order: (0 | 1)[] = this.flipped ? [0, 1] : [1, 0];
     for (const L of order) {
@@ -160,11 +210,11 @@ export class View2D {
     ctx.beginPath();
     for (const p of b.pads) if (p.type !== 'smd') holePath(ctx, p);
     for (const v of b.vias) { ctx.moveTo(v.x + v.drill / 2, v.y); ctx.arc(v.x, v.y, v.drill / 2, 0, Math.PI * 2); }
-    ctx.fillStyle = '#0d1117';
+    ctx.fillStyle = bg;
     ctx.fill();
     // silkscreen (top)
     if (this.layers.silk && this.silk && !this.flipped) {
-      ctx.strokeStyle = '#f2f2e6';
+      ctx.strokeStyle = b.settings.silkColor || '#f2f2e6';
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       for (const l of this.silk.lines) {
@@ -196,6 +246,24 @@ export class View2D {
       ctx.lineWidth = 2 / this.scale;
       for (const m of this.markers) { ctx.beginPath(); ctx.arc(m.x, m.y, 8 / this.scale, 0, Math.PI * 2); ctx.stroke(); }
     }
+    // selection / drag ghost
+    const sel = this.selected ? b.comps.find((c) => c.ref === this.selected) : undefined;
+    if (sel) {
+      const r = courtyardRect(sel.fp, sel.x, sel.y, sel.rot);
+      ctx.strokeStyle = '#58a6ff';
+      ctx.lineWidth = 2 / this.scale;
+      ctx.setLineDash([4 / this.scale, 3 / this.scale]);
+      ctx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+      ctx.setLineDash([]);
+    }
+    if (this.ghost && sel) {
+      const r = courtyardRect(sel.fp, this.ghost.x, this.ghost.y, sel.rot);
+      ctx.fillStyle = 'rgba(88,166,255,0.25)';
+      ctx.fillRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+      ctx.strokeStyle = '#58a6ff';
+      ctx.lineWidth = 2 / this.scale;
+      ctx.strokeRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+    }
     // outline
     ctx.beginPath();
     roundedRectPath(ctx, 0, 0, b.width, b.height, b.cornerRadius);
@@ -218,3 +286,9 @@ export class View2D {
   snapshot(): string { return this.canvas.toDataURL('image/png'); }
 }
 
+
+function shade(hex: string, k: number): string {
+  const n = parseInt((hex || '#1f7a3a').slice(1), 16);
+  const c = (sh: number) => Math.round(((n >> sh) & 255) * k);
+  return `rgb(${c(16)},${c(8)},${c(0)})`;
+}

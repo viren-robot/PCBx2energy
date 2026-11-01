@@ -69,3 +69,16 @@ Default rules: 0.25 mm signal / 0.5 mm power tracks, 0.2 mm clearance, 0.6/0.3 m
 * LCSC numbers are suggestions; confirm stock/part in the JLCPCB part library. JLCPCB rotation offsets follow the commonly used KiCad→JLCPCB table — always confirm in JLCPCB's placement preview.
 * Ground pour uses solid connections (no thermal reliefs), which makes hand-soldering large GND THT pads slower.
 * The autorouter is grid-based; very dense boards may need a larger board size (it grows auto-sized boards automatically) or narrower tracks.
+
+## v2: accounts, schematic, editing, self-checking
+
+* **Sign-in** (Supabase Auth): email magic link to any address (Gmail works) or one of four fixed admin accounts (`stellarx1`, `stellarx2`, `strix3`, `strix4`; usernames are not case sensitive). Admins can see every user's saved designs in the **Cloud** tab. Row Level Security enforces this in the database.
+* **Dark / light mode** toggle (◐), remembered per browser.
+* **AI does the work, you keep control**: Claude (or the offline templates) designs the circuit, adds silkscreen/schematic **labels**, picks the **board colour** from plain words ("matte black with gold finish", "purple board white silkscreen"), then you can drag/rotate/delete parts in 2D, add parts, edit nets in the Netlist tab, change rules and colours.
+* **Schematic** tab: generated from the *board* (PCB → schematic) with real symbols, power/ground symbols and net labels. It also reports whether the copper matches the netlist (layout-vs-schematic: shorts/opens).
+* **3D**: shadows and reflections, rounded bodies, gull-wing IC leads, solder joints, resistor markings, LED domes, hover tooltips, X-ray copper mode, auto-rotate.
+* **Self-check before anything is exported**: 3 review passes (Claude re-checks its own circuit against an electrical-rule checker; an edit that makes the checks worse is rejected) and 5 full place-route-DRC runs (clearance, edge, courtyard overlap, shorts, opens, unrouted). Every export re-runs the 5× DRC on the current design.
+
+### Deployment notes
+* Backend: Supabase project `pcbx2energy` (table `designs` with RLS). Only the public publishable key is in the client.
+* In the Supabase dashboard set **Authentication → URL Configuration → Site URL** to your deployed URL and add the other deployment URL(s) to *Redirect URLs*, otherwise magic links return to the wrong address. The built-in Supabase mailer is rate limited and may only deliver to your own team's addresses until you configure custom SMTP.

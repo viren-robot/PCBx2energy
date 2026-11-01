@@ -34,8 +34,9 @@ it('STM32F103 board (LQFP-48, 0.5mm pitch) routes cleanly', () => {
   };
   const t0 = Date.now();
   const b = runPipeline(d, DEFAULT_SETTINGS);
-  const issues = runDrc(b).filter((x) => x.kind === 'clearance' || x.kind === 'edge' || x.kind === 'unrouted');
+  const issues = runDrc(b).filter((x) => x.kind !== 'warning');
   console.log(`STM32: ${b.width}x${b.height} in ${Date.now() - t0} ms; ${b.routeLog.join(' | ')}`, issues.slice(0, 5).map((i) => i.msg));
+  { const n = b.nets.findIndex((x) => x.name === 'DP'); console.log('DPPADS', b.pads.filter((p) => p.net === n).map((p) => `${p.ref}.${p.pin}@${p.x.toFixed(2)},${p.y.toFixed(2)} ${p.w}x${p.h}`).join(' ; ')); console.log('DPTRK', JSON.stringify(b.tracks.filter((t) => t.net === n).map((t) => [t.layer, t.width, t.pts])), JSON.stringify(b.vias.filter((v) => v.net === n))); }
   mkdirSync('test/out/stm32', { recursive: true });
   writeFileSync('test/out/stm32/debug.svg', boardSvg(b));
   expect(b.warnings.filter((w) => !/only one pin|merged/.test(w))).toEqual([]);

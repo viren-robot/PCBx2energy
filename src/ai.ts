@@ -13,7 +13,7 @@ export const MODELS = [
 const DESIGN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['name', 'description', 'board', 'components', 'nets', 'notes'],
+  required: ['name', 'description', 'board', 'components', 'nets', 'notes', 'labels', 'style'],
   properties: {
     name: { type: 'string', description: 'Short board name (max ~30 chars), printed on silkscreen.' },
     description: { type: 'string' },
@@ -57,6 +57,31 @@ const DESIGN_SCHEMA = {
       },
     },
     notes: { type: 'array', items: { type: 'string' }, description: 'Design notes / assumptions for the user.' },
+    labels: {
+      type: 'array',
+      description: 'Silkscreen + schematic labels. Label connector/header pins with their function (3V3, GND, TX, RX, SDA...), buttons (RST, BOOT), status LEDs (PWR, STAT), and key ICs.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ref', 'text', 'pin'],
+        properties: {
+          ref: { type: 'string' },
+          text: { type: 'string', description: 'Max 10 characters, upper case.' },
+          pin: { type: 'string', description: 'Pin of ref the label belongs to, or empty string for a label next to the whole part.' },
+        },
+      },
+    },
+    style: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['maskColor', 'silkColor', 'finish'],
+      description: 'Board appearance. Use empty strings unless the user asked for a colour/finish.',
+      properties: {
+        maskColor: { type: 'string', description: 'Solder mask colour as #rrggbb, or empty string.' },
+        silkColor: { type: 'string', description: 'Silkscreen colour as #rrggbb, or empty string.' },
+        finish: { type: 'string', enum: ['HASL', 'ENIG', ''] },
+      },
+    },
   },
 } as const;
 
@@ -73,6 +98,8 @@ Rules:
 - Set board width/height to 0 (auto) unless the user specifies a size. If the user gives a size, honour it.
 - Add 4x MountingHole_3.2mm_M3 only if asked for mounting holes or the board is larger than ~50x50mm.
 - Keep it practical: max ~60 components.
+- Always add labels: every header/connector pin that carries a signal or power, buttons, status LEDs and the main ICs.
+- Board colour: if the user asks for a colour ("black PCB", "purple board with gold finish", "white silkscreen"), set style.maskColor / silkColor (#rrggbb) / finish; otherwise leave them as empty strings. Mask colours should be real fab colours (green #1f7a3a, black #141414, white #f2f2ee, blue #1d4f9c, red #b3202a, purple #5b2a86, yellow #d9b320).
 - When asked to modify an existing design, return the FULL updated design (not a diff), keeping unchanged parts and references stable.
 
 Available footprints:
@@ -90,27 +117,26 @@ export interface AiOptions {
   fetch?: typeof fetch;
 }
 
-export async function generateDesign(o: AiOptions): Promise<Design> {
+interface CallOpts { apiKey: string; model: string; system: string; userText: string; onProgress?: (msg: string) => void; signal?: AbortSignal; fetch?: typeof fetch; label: string }
+
+async function requestDesign(o: CallOpts): Promise<Design> {
   const client = new Anthropic({ apiKey: o.apiKey, dangerouslyAllowBrowser: true, maxRetries: 2, ...(o.fetch ? { fetch: o.fetch } : {}) });
-  const userText = o.current
-    ? `Current design (JSON):\n${JSON.stringify(o.current)}\n\nModify it as follows: ${o.prompt}`
-    : `Design a PCB for: ${o.prompt}`;
   const useFallbacks = o.model !== 'claude-haiku-5-5';
   const params = {
     model: o.model,
     max_tokens: 32000,
-    system: systemPrompt(),
-    messages: [{ role: 'user' as const, content: userText }],
+    system: o.system,
+    messages: [{ role: 'user' as const, content: o.userText }],
     output_config: { effort: 'high' as const, format: { type: 'json_schema' as const, schema: DESIGN_SCHEMA as unknown as Record<string, unknown> } },
     ...(useFallbacks ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
   };
-  o.onProgress?.('Sending request to Claude…');
+  o.onProgress?.(`${o.label}: sending request to Claude…`);
   let chars = 0;
   const run = async (p: typeof params) => {
     const stream = client.beta.messages.stream(p, { signal: o.signal });
     stream.on('text', (delta) => {
       chars += delta.length;
-      o.onProgress?.(`Claude is designing the circuit… ${chars.toLocaleString()} chars`);
+      o.onProgress?.(`${o.label}: Claude is working… ${chars.toLocaleString()} chars`);
     });
     return stream.finalMessage();
   };
@@ -134,10 +160,53 @@ export async function generateDesign(o: AiOptions): Promise<Design> {
   } catch {
     throw new Error('Claude returned invalid JSON. Please try again.');
   }
+  return normalizeDesign(design);
+}
+
+export function normalizeDesign(design: Design): Design {
   if (!Array.isArray(design.components) || !Array.isArray(design.nets)) throw new Error('Claude returned an incomplete design.');
   design.board ??= { width: 0, height: 0, cornerRadius: 1 };
   design.notes ??= [];
+  design.labels = (design.labels ?? []).filter((l) => l && l.ref && l.text).map((l) => ({ ref: l.ref, text: l.text.toUpperCase().slice(0, 10), pin: l.pin || undefined }));
+  const st = design.style ?? {};
+  design.style = {
+    maskColor: /^#[0-9a-f]{6}$/i.test(st.maskColor ?? '') ? st.maskColor : undefined,
+    silkColor: /^#[0-9a-f]{6}$/i.test(st.silkColor ?? '') ? st.silkColor : undefined,
+    finish: st.finish === 'ENIG' || st.finish === 'HASL' ? st.finish : undefined,
+  };
   return design;
+}
+
+export async function generateDesign(o: AiOptions): Promise<Design> {
+  const userText = o.current
+    ? `Current design (JSON):\n${JSON.stringify(o.current)}\n\nModify it as follows: ${o.prompt}`
+    : `Design a PCB for: ${o.prompt}`;
+  return requestDesign({ ...o, system: systemPrompt(), userText, label: 'Design' });
+}
+
+export interface ReviewOptions {
+  apiKey: string;
+  model: string;
+  design: Design;
+  issues: string[];
+  pass: number;
+  total: number;
+  onProgress?: (msg: string) => void;
+  signal?: AbortSignal;
+  fetch?: typeof fetch;
+}
+
+/** One self-review pass: Claude re-checks its own circuit against the automated findings and returns a corrected design. */
+export async function reviewDesign(o: ReviewOptions): Promise<Design> {
+  const userText = `REVIEW PASS ${o.pass} OF ${o.total}.
+Current design (JSON):
+${JSON.stringify(o.design)}
+
+Automated electrical checks found ${o.issues.length ? 'these problems:\n- ' + o.issues.join('\n- ') : 'no problems'}.
+
+Re-check your work like a careful reviewer: verify every IC pin number against its datasheet and the footprint pin list, power/ground on every IC, decoupling, pull-ups/pull-downs, LED resistors, USB-C CC resistors, reset/boot circuitry, polarity of diodes/LEDs/electrolytics, duplicated or missing nets, and that labels match what the pins really do.
+Fix every real error. Keep references, values and labels that are already correct unchanged. Return the FULL corrected design (add a short note to "notes" for each fix you made, prefixed with "Review ${o.pass}:").`;
+  return requestDesign({ apiKey: o.apiKey, model: o.model, system: systemPrompt(), userText, onProgress: o.onProgress, signal: o.signal, fetch: o.fetch, label: `AI review ${o.pass}/${o.total}` });
 }
 
 function friendlyError(e: unknown): Error {

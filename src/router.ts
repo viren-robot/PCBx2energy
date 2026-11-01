@@ -332,7 +332,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
   }
 
   /** Greedy string-pulling restricted to 0/45/90 degree segments, checked against the obstacle map. */
-  function straighten(pts: [number, number][], m: Int16Array, net: number): [number, number][] {
+  function straighten(pts: [number, number][], m: Int16Array, net: number, keep?: Set<number>): [number, number][] {
     if (pts.length < 3) return pts;
     const ok = (a: [number, number], b: [number, number]) => {
       const dx = b[0] - a[0], dy = b[1] - a[1];
@@ -348,8 +348,10 @@ export function route(board: Board, progress?: Progress): RouteResult {
     };
     const out: [number, number][] = [pts[0]];
     let i = 0;
+    const kept = (k: number) => !!keep && keep.has(Math.round(pts[k][1] / g) * nx + Math.round(pts[k][0] / g));
     while (i < pts.length - 1) {
       let j = Math.min(pts.length - 1, i + 400);
+      for (let k = i + 1; k < j; k++) if (kept(k)) { j = k; break; } // never skip a junction
       while (j > i + 1 && !ok(pts[i], pts[j])) j--;
       out.push(pts[j]);
       i = j;
@@ -358,7 +360,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
   }
 
   /** Path -> tracks/vias. If `strict` is given, runs are straightened against it. */
-  function geometry(conn: Conn, net: number, strict: Int16Array[] | null): { tracks: Track[]; vias: Via[] } {
+  function geometry(conn: Conn, net: number, strict: Int16Array[] | null, keep?: Set<number>): { tracks: Track[]; vias: Via[] } {
     const { path, kind, pad } = conn;
     const width = kind === 1 ? s.powerTrackWidth : s.trackWidth;
     const tracks: Track[] = [];
@@ -367,7 +369,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
     let runL = path[0] >= N ? 1 : 0;
     const flush = () => {
       if (run.length >= 2) {
-        const pts = simplify(strict ? straighten(run, strict[kind * 2 + runL], net) : run);
+        const pts = simplify(strict ? straighten(run, strict[kind * 2 + runL], net, keep) : run);
         tracks.push({ net, layer: runL as 0 | 1, width, pts });
       }
     };
@@ -590,8 +592,15 @@ export function route(board: Board, progress?: Progress): RouteResult {
   const vias: Via[] = [];
   const unrouted: RouteResult['unrouted'] = [];
   const bad = new Set(signal.filter((n) => conflictsOf(n).length > 0));
-  const commit = (net: number, conn: Conn) => {
-    const gm = geometry(conn, net, strict);
+  // junction cells per net: where a later connection of the same net attaches to an earlier one
+  const anchors = new Map<number, Set<number>>();
+  for (const net of signal) {
+    const a = new Set<number>();
+    for (const conn of netConns[net]) a.add(conn.path[conn.path.length - 1] % N);
+    anchors.set(net, a);
+  }
+  const commit = (net: number, conn: Conn, straight = true) => {
+    const gm = geometry(conn, net, straight ? strict : null, anchors.get(net));
     for (const t of gm.tracks) { tracks.push(t); for (const sh of trackShapes(t)) stamp(strict, t.layer, sh, net); }
     for (const v of gm.vias) { vias.push(v); for (const L of [0, 1]) stamp(strict, L, { t: 'circle', x: v.x, y: v.y, r: v.d / 2 }, net); }
   };
@@ -607,7 +616,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
   for (const net of signal) if (!bad.has(net)) for (const conn of netConns[net]) commit(net, conn);
   // re-route still-conflicting nets strictly (shortest first)
   for (const net of [...bad].filter((n) => n !== pourNet).sort((a, b) => hpwl(a) - hpwl(b))) {
-    const fails = routeNet(net, strict, -1, (conn) => commit(net, conn));
+    const fails = routeNet(net, strict, -1, (conn) => commit(net, conn, false));
     for (const f of fails) unrouted.push({ net, ...f });
   }
   for (const [net, fails] of hardFail) if (!bad.has(net) && net !== pourNet) for (const f of fails) unrouted.push({ net, ...f });
@@ -640,7 +649,7 @@ export function route(board: Board, progress?: Progress): RouteResult {
         const path = search(strict, src, pourNet, k, null, label, main);
         if (path) { conn = { path, kind: k, pad: startPad(node, path[0]) }; break; }
       }
-      if (conn) commit(pourNet, conn);
+      if (conn) commit(pourNet, conn, false);
       else unrouted.push({ net: pourNet, a: [node.pads[0].x, node.pads[0].y], b: [node.pads[0].x, node.pads[0].y] });
     }
   }

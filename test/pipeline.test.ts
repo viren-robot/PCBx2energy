@@ -16,7 +16,7 @@ describe('offline examples route cleanly and export', () => {
       const r = { log: board.routeLog, unrouted: board.unrouted };
       const t1 = t0, t2 = Date.now();
       const drc = runDrc(board);
-      const bad = drc.filter((d) => d.kind === 'clearance' || d.kind === 'edge');
+      const bad = drc.filter((d) => d.kind !== 'warning');
       console.log(`${ex.label}: ${board.width}x${board.height}mm, ${board.comps.length} parts, place ${t1 - t0}ms, route ${t2 - t1}ms; ${r.log.join(' | ')}; DRC ${bad.length}`);
       for (const d of drc.filter((d) => d.kind !== 'warning').slice(0, 8)) console.log('   ', d.kind, d.msg);
       for (const w of board.warnings) console.log('    warn', w);

@@ -1,6 +1,6 @@
 // Offline "AI": parses the prompt with rules and builds a design from parameterized circuit templates.
 // Used when no API key is configured, and as examples/test fixtures.
-import type { Design, DesignComponent } from './types';
+import type { Design, DesignComponent, DesignLabel } from './types';
 
 // Commonly stocked JLCPCB basic/extended parts. Suggestions only - verify before ordering.
 const LCSC: Record<string, string> = {
@@ -289,7 +289,7 @@ export const EXAMPLES: { label: string; prompt: string }[] = [
   { label: 'USB-UART', prompt: 'USB-C to UART adapter with CH340C and FTDI header' },
 ];
 
-export function offlineDesign(prompt: string): { design: Design; matched: string } {
+function offlineDesignRaw(prompt: string): { design: Design; matched: string } {
   const t = prompt.toLowerCase();
   const o = parsePrompt(prompt);
   if (/esp32|wifi|wi-fi|bluetooth/.test(t)) return { design: esp32Board(o), matched: 'ESP32 dev board' };
@@ -299,4 +299,34 @@ export function offlineDesign(prompt: string): { design: Design; matched: string
   if (/mosfet|motor|switch|relay|strip|solenoid/.test(t)) return { design: mosfetBoard(o), matched: 'MOSFET load switch' };
   if (/regulator|ldo|3\.3|3v3|ams1117|power supply/.test(t)) return { design: ldoBoard(o), matched: '3.3V LDO' };
   return { design: ledBoard(o), matched: 'LED board' };
+}
+
+/** Silkscreen/schematic labels derived from nets and part descriptions (offline equivalent of the AI's labelling). */
+export function autoLabels(d: Design): DesignLabel[] {
+  const out: DesignLabel[] = [];
+  const byRef = new Map(d.components.map((c) => [c.ref, c]));
+  const short = (n: string) => n.replace(/^LED_?.*/i, '').replace(/^VBUS$/i, 'VBUS').toUpperCase().slice(0, 8);
+  for (const net of d.nets) {
+    for (const pin of net.pins) {
+      const m = pin.match(/^([^.]+)\.(.+)$/);
+      if (!m) continue;
+      const c = byRef.get(m[1]);
+      if (!c || !/^(PinHeader|JST|TerminalBlock)/.test(c.footprint)) continue;
+      const t = short(net.name);
+      if (t) out.push({ ref: c.ref, text: t, pin: m[2] });
+    }
+  }
+  for (const c of d.components) {
+    const t = `${c.value} ${c.description}`.toLowerCase();
+    if (c.footprint === 'USB_C_16P') out.push({ ref: c.ref, text: 'USB-C' });
+    else if (/^SW_/.test(c.footprint)) out.push({ ref: c.ref, text: /boot/.test(t) ? 'BOOT' : /reset|rst/.test(t) ? 'RST' : 'BTN' });
+    else if (/^LED_/.test(c.footprint)) out.push({ ref: c.ref, text: /power|pwr/.test(t) ? 'PWR' : /status|io|blink|d13/.test(t) ? 'STAT' : 'LED' });
+  }
+  return out;
+}
+
+export function offlineDesign(prompt: string): { design: Design; matched: string } {
+  const r = offlineDesignRaw(prompt);
+  r.design.labels = autoLabels(r.design);
+  return r;
 }

@@ -1,5 +1,6 @@
 // Silkscreen generation: body outlines clipped away from pads, pin-1 markers, reference designators.
 import { textStrokes, textWidth } from './font';
+import { resolvePin } from './footprints';
 import { rotPt, courtyardRect, type Rect } from './layout';
 import type { Board } from './types';
 
@@ -43,6 +44,7 @@ export function buildSilk(board: Board): Silk {
   const texts: SilkText[] = [];
   const padRects: Rect[] = board.pads.map((p) => ({ x0: p.x - p.w / 2 - 0.2, y0: p.y - p.h / 2 - 0.2, x1: p.x + p.w / 2 + 0.2, y1: p.y + p.h / 2 + 0.2 }));
   const bodies: Rect[] = [];
+  const bodyOf = new Map<string, Rect>();
   for (const c of board.comps) {
     const kind = c.fp.body.kind;
     if (kind === 'hole') continue;
@@ -51,6 +53,7 @@ export function buildSilk(board: Board): Silk {
     const bh = (swap ? c.fp.body.w : c.fp.body.h) / 2 + 0.1;
     const r: Rect = { x0: c.x - bw, y0: c.y - bh, x1: c.x + bw, y1: c.y + bh };
     bodies.push(r);
+    bodyOf.set(c.ref, r);
     const corners: [number, number][] = [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]];
     for (let i = 0; i < 4; i++) {
       for (const seg of clipSegment(corners[i], corners[(i + 1) % 4], padRects)) lines.push({ pts: seg, w: LINE_W });
@@ -106,6 +109,42 @@ export function buildSilk(board: Board): Silk {
       }
     }
   });
+  // Labels (AI / user): pin functions next to pads, free text next to parts.
+  for (const lb of board.design.labels ?? []) {
+    const c = board.comps.find((k) => k.ref === lb.ref);
+    if (!c || !lb.text) continue;
+    const text = lb.text.slice(0, 14);
+    const own = bodyOf.get(c.ref);
+    for (const h of [0.8, 0.65]) {
+      const tw = textWidth(text, h);
+      const cands: [number, number][] = [];
+      if (lb.pin) {
+        const id = resolvePin(c.fp, lb.pin) ?? lb.pin;
+        const p = board.pads.find((q) => q.ref === c.ref && q.pin === id);
+        if (!p) break;
+        const rx = Math.max(p.x + p.w / 2, own?.x1 ?? 0) + 0.3 + tw / 2;
+        const lx = Math.min(p.x - p.w / 2, own?.x0 ?? 1e9) - 0.3 - tw / 2;
+        const ty = p.y + p.h / 2 + 0.35 + h / 2, by = p.y - p.h / 2 - 0.35 - h / 2;
+        const outward = p.x >= c.x ? [rx, lx] : [lx, rx];
+        for (const x of outward) cands.push([x, p.y]);
+        cands.push([p.x, ty], [p.x, by]);
+      } else {
+        const cr = courtyardRect(c.fp, c.x, c.y, c.rot);
+        cands.push([c.x, cr.y0 - h / 2 - 0.3 - 1.2], [c.x, cr.y1 + h / 2 + 0.3 + 1.2], [cr.x1 + tw / 2 + 0.3, c.y], [cr.x0 - tw / 2 - 0.3, c.y]);
+      }
+      let done = false;
+      for (const [x, y] of cands) {
+        const r: Rect = { x0: x - tw / 2 - 0.1, y0: y - h / 2 - 0.1, x1: x + tw / 2 + 0.1, y1: y + h / 2 + 0.1 };
+        if (!inside(r)) continue;
+        if (padRects.some((q) => over(r, q)) || used.some((u) => over(r, u)) || bodies.some((b) => b !== own && over(r, b))) continue;
+        used.push(r);
+        texts.push({ text, x, y, h, ref: 'label' });
+        done = true;
+        break;
+      }
+      if (done) break;
+    }
+  }
   // Board name + date in a free spot.
   const title = board.design.name.slice(0, 32);
   for (const h of [1.2, 1.0]) {
