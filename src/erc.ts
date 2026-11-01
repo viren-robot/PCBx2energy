@@ -6,7 +6,7 @@ import type { Design } from './types';
 
 export interface ErcIssue { severity: 'error' | 'warn'; msg: string; ref?: string; fixable?: boolean }
 
-const isIc = (fpId: string, kind: string) => kind === 'ic' || kind === 'qfp' || kind === 'module' || kind === 'dip' || (kind === 'sot' && /^U/.test(fpId)) || /SOIC|TSSOP|LQFP|DIP|ESP32/.test(fpId);
+const isIc = (fpId: string, kind: string) => kind === 'ic' || kind === 'qfp' || kind === 'module' || kind === 'dip' || kind === 'qfn' || (kind === 'sot' && /^U/.test(fpId)) || /SOIC|TSSOP|SSOP|MSOP|LQFP|QFN|DFN|DIP|ESP32|ESP-12|WS2812|Pico/.test(fpId);
 
 export function runErc(design: Design): ErcIssue[] {
   const issues: ErcIssue[] = [];

@@ -294,6 +294,62 @@ function componentModel(pc: PlacedComponent, thickness: number): THREE.Group {
       g.add(box(10, 1.3, 6.5, metal, 0, 1.6, 12));
       for (const p of pads) g.add(box(0.8, 0.5, 6, metal, p.x, p.y, -thickness - 1));
       break;
+    case 'qfn':
+      labelled(0x1e1e20, comp.value, 0.03);
+      for (const p of pads) if (p.type === 'smd') g.add(box(p.w * 0.9, p.h * 0.9, 0.06, gold, p.x, p.y, 0));
+      break;
+    case 'box': {
+      g.add(box(W, H, Math.max(Z, 0.05), mat(b.color ?? 0x2a2a2e, 0, 0.6), 0, 0, fp.mount === 'smd' ? 0.02 : 0.1));
+      for (const p of pads) {
+        if (p.type === 'tht') g.add(box(0.6, 0.6, 3.5, metal, p.x, p.y, -thickness - 1.5));
+        else if (p.type === 'smd') g.add(box(Math.min(p.w, W + 1), Math.min(p.h, H + 1), 0.05, metal, p.x, p.y, 0));
+      }
+      break;
+    }
+    case 'socket':
+      for (const p of pads) {
+        g.add(box(2.5, 2.5, Z, black, p.x, p.y, 0));
+        g.add(box(1.0, 1.0, 0.05, mat(0x000000, 0, 0.9), p.x, p.y, Z));
+        g.add(box(0.6, 0.6, 3.5, metal, p.x, p.y, -thickness - 1.5));
+      }
+      break;
+    case 'cylinder':
+      g.add(cyl(W / 2, Z, mat(b.color ?? 0x222222, 0.2, 0.5), 0, 0, 0.1, 32));
+      g.add(cyl(Math.max(0.2, W / 2 - 0.4), 0.05, mat(0x050505, 0, 0.9), 0, 0, Z + 0.1, 32));
+      for (const p of pads) if (p.type === 'tht') g.add(box(0.6, 0.6, 3.5, metal, p.x, p.y, -thickness - 1.5));
+      break;
+    case 'axial': {
+      const r = H / 2, zc = r + 0.4;
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(r, r, W, 24), mat(b.color ?? 0xc8a56a, 0.05, 0.6));
+      body.rotation.z = Math.PI / 2;
+      body.position.set(0, 0, zc);
+      g.add(body);
+      if (fp.id.startsWith('D_')) {
+        const band = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.03, r * 1.03, W * 0.14, 24), mat(0xc0c0c0, 0.6, 0.4));
+        band.rotation.z = Math.PI / 2;
+        band.position.set(-W * 0.32, 0, zc);
+        g.add(band);
+      }
+      for (const p of pads) {
+        const sx = Math.sign(p.x) || 1, len = Math.max(0.3, Math.abs(p.x) - W / 2 + 0.25);
+        g.add(box(len, 0.5, 0.5, metal, sx * (W / 2 + len / 2 - 0.25), 0, zc - 0.25));
+        g.add(box(0.5, 0.5, zc + thickness + 1.5, metal, p.x, 0, -thickness - 1.5));
+      }
+      break;
+    }
+    case 'led_tht': {
+      const col = LED_COLORS[comp.value.toLowerCase()] ?? LED_COLORS[(comp.description.match(/red|green|blue|yellow|white|orange/i) ?? ['red'])[0].toLowerCase()] ?? 0xff2a2a;
+      const lm = mat(col, 0, 0.15, { transparent: true, opacity: 0.85, emissive: col, emissiveIntensity: 0.3 });
+      const r = W / 2;
+      g.add(cyl(r * 1.15, 0.9, lm, 0, 0, 0.3, 28));
+      g.add(cyl(r, Z * 0.55, lm, 0, 0, 1.2, 28));
+      const dome = new THREE.Mesh(new THREE.SphereGeometry(r, 28, 14, 0, Math.PI * 2, 0, Math.PI / 2), lm);
+      dome.rotation.x = Math.PI / 2;
+      dome.position.set(0, 0, Z * 0.55 + 1.2);
+      g.add(dome);
+      for (const p of pads) if (p.type === 'tht') g.add(box(0.6, 0.6, 3.5, metal, p.x, p.y, -thickness - 1.5));
+      break;
+    }
     case 'hole':
       break;
   }

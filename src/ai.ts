@@ -101,6 +101,7 @@ Rules:
 - Set board width/height to 0 (auto) unless the user specifies a size. If the user gives a size, honour it.
 - Add 4x MountingHole_3.2mm_M3 only if asked for mounting holes or the board is larger than ~50x50mm.
 - Keep it practical: max ~60 components.
+- Footprints marked [nominal geometry] use typical datasheet dimensions; prefer them only when no standard footprint fits, and name the exact part in mpn. For Wi-Fi/BLE/MCU radios prefer a ready-made module footprint (ESP32-WROOM-32, ESP32-S3-WROOM-1, ESP-12F, RPi_Pico) over a bare QFN chip, which also needs flash, a crystal and an RF matching network.
 - Always add labels: every header/connector pin that carries a signal or power, buttons, status LEDs and the main ICs.
 - Board colour: if the user asks for a colour ("black PCB", "purple board with gold finish", "white silkscreen"), set style.maskColor / silkColor (#rrggbb) / finish; otherwise leave them as empty strings. Mask colours should be real fab colours (green #1f7a3a, black #141414, white #f2f2ee, blue #1d4f9c, red #b3202a, purple #5b2a86, yellow #d9b320).
 - When asked to modify an existing design, return the FULL updated design (not a diff), keeping unchanged parts and references stable.

@@ -35,6 +35,12 @@ export type BodyKind =
   | 'cap_elec'
   | 'cap_smd_elec'
   | 'to220'
+  | 'qfn'
+  | 'box'
+  | 'cylinder'
+  | 'axial'
+  | 'led_tht'
+  | 'socket'
   | 'hole';
 
 export interface FootprintDef {
@@ -54,6 +60,8 @@ export interface FootprintDef {
   /** Pins whose multiple pads are connected inside the part (switch legs, SOT-223 tab, module GND). */
   bridgedPins?: string[];
   pinCount: number;
+  /** Nominal / typical-datasheet geometry: compare with the exact part's datasheet before ordering. */
+  approx?: boolean;
 }
 
 // ---------- Logical design (what the AI produces) ----------

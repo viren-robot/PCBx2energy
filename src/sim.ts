@@ -203,7 +203,7 @@ export function simulate(board: Board, input: SimInput): SimResult {
           if (inn >= 0 && mode !== 'short') { b[inn] -= iout; G[inn][inn] += reg.iq / Math.max(reg.vout, 1); }
           if (mode === 'short' && out >= 0 && inn >= 0) g2(inn, out, 1 / 0.2);
         }
-        if (['ic', 'qfp', 'module', 'dip'].includes(c.fp.body.kind) && !reg) {
+        if (['ic', 'qfp', 'qfn', 'module', 'dip'].includes(c.fp.body.kind) && !reg) {
           const spec = icSpec(c);
           const rail = railOf(c);
           if (rail >= 0 && mode !== 'open') {
@@ -366,7 +366,7 @@ export function simulate(board: Board, input: SimInput): SimResult {
         if (vds > 30) bump('failed', `Vds ${vds.toFixed(1)} V exceeds the 30 V rating`);
         if (r.i > 5.7) bump('failed', `${r.i.toFixed(1)} A exceeds the 5.7 A rating`);
         else if (r.i > 3) bump('hot', `${r.i.toFixed(1)} A: needs copper area for cooling`);
-      } else if (['ic', 'qfp', 'module', 'dip'].includes(c.fp.body.kind)) {
+      } else if (['ic', 'qfp', 'qfn', 'module', 'dip'].includes(c.fp.body.kind)) {
         const spec = icSpec(c);
         r.kind = spec.name;
         const rail = railOf(c);

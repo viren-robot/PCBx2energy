@@ -5,7 +5,7 @@ import { generateDesign, MODELS, validateApiKey } from './ai';
 import { adminLogin, deleteCloudDesign, displayName, isAdminSession, listCloudDesigns, saveCloudDesign, sendMagicLink, signOut, supabase } from './cloud';
 import { runDrc, runLvs, type DrcIssue } from './drc';
 import { bomLines, buildFabPackage, FABS, type OutFile } from './export';
-import { FOOTPRINT_IDS, getFootprint, resolvePin } from './footprints';
+import { FOOTPRINT_IDS, approxFootprints, getFootprint, resolvePin } from './footprints';
 import { buildSchematic, schematicDownload, type Schematic } from './schematic';
 import { buildSilk, type Silk } from './silk';
 import { isStyleOnly, parseStyle } from './style';
@@ -310,6 +310,8 @@ async function verifyAndShow(d: Design, fresh: boolean) {
   const errs = drc.filter((x) => x.kind !== 'warning').length;
   if (errs) { setStatus(`Done in ${secs}s - ${errs} issue(s) remain. See Health checks.`, 'err'); say(`⚠ The board is built but ${errs} issue(s) remain — see <b>Health checks</b> on the right. Try a bigger board or more layers.`, 'ai', 'err'); }
   else { setStatus(`Done in ${secs}s - ${r.board.layers}-layer board passed ${REVIEW_PASSES} reviews and ${DRC_RUNS} DRC runs. Ready to export.`, 'ok'); say(`✅ <b>Your board is ready</b> — ${r.board.width.toFixed(0)} × ${r.board.height.toFixed(0)} mm, ${r.board.layers} layers, ${r.board.tracks.length} wires. It passed ${REVIEW_PASSES} self-reviews and ${DRC_RUNS} design checks.<br><span class="muted">Next: spin it in <b>3D</b>, then try <b>Test power &amp; heat</b>.</span>`, 'ai', 'ok'); }
+  const nominal = approxFootprints(r.board.comps.map((c) => c.fp.id));
+  if (nominal.length) say(`ℹ️ <b>Check before ordering:</b> ${nominal.map(esc).join(', ')} use typical datasheet dimensions. Compare them with the exact part's datasheet (the 2D view shows the pads).`, 'sys');
   renderVerify();
 }
 
