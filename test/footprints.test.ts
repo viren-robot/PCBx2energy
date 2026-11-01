@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { FOOTPRINTS, FOOTPRINT_IDS, getFootprint, footprintCatalog, approxFootprints, resolvePin } from '../src/footprints';
+import { FOOTPRINTS, FOOTPRINT_IDS, getFootprint, footprintCatalog, approxFootprints, resolvePin, registerCustomFootprints } from '../src/footprints';
 import { runPipeline } from '../src/pipeline';
 import { runDrc } from '../src/drc';
 import { DEFAULT_SETTINGS } from '../src/types';
@@ -8,7 +8,7 @@ import type { Design } from '../src/types';
 describe('footprint library', () => {
   it('has unique ids and sane pads', () => {
     expect(new Set(FOOTPRINT_IDS).size).toBe(FOOTPRINT_IDS.length);
-    expect(FOOTPRINT_IDS.length).toBeGreaterThan(250);
+    expect(FOOTPRINT_IDS.length).toBeGreaterThan(300);
     for (const f of Object.values(FOOTPRINTS)) {
       expect(f.pads.length, f.id).toBeGreaterThan(0);
       for (const p of f.pads) { expect(Number.isFinite(p.x + p.y + p.w + p.h), f.id).toBe(true); expect(p.w, f.id).toBeGreaterThan(0); }
@@ -65,5 +65,46 @@ describe('footprint library', () => {
     expect(b.comps.length).toBe(8);
     expect(b.tracks.length).toBeGreaterThan(5);
     expect(runDrc(b).filter((x) => x.kind !== 'warning').map((x) => x.msg)).toEqual([]);
+  });
+
+  it('has the requested connector/module families', () => {
+    for (const id of ['microSD_Hirose_DM3AT', 'SD_Hirose_DM1AA', 'RJ45_Hanrun_HR911105A', 'HDMI_A_Amphenol_10029449', 'BGA-256_16x16_P1.0', 'FPC_0.5mm_24P', 'FPC_1.0mm_8P', 'Relay_SPDT_Omron_G5LE', 'BatteryHolder_CR2032_BS-07', 'SMA_Vertical_Amphenol_132134', 'ESP32-C6-MINI-1']) expect(FOOTPRINTS[id], id).toBeTruthy();
+    const c6 = FOOTPRINTS['ESP32-C6-MINI-1'];
+    expect(resolvePin(c6, 'EN')).toBe('8');
+    expect(resolvePin(c6, 'GPIO8')).toBe('22');
+    expect(resolvePin(c6, 'GND')).toBe('GND');
+    expect(resolvePin(FOOTPRINTS['Relay_SPDT_Hongfa_JQC-3FF'], 'NO')).toBe('14');
+    expect(FOOTPRINTS['BGA-256_16x16_P1.0'].pads.length).toBe(256);
+  });
+  it('registers AI-created footprints and uses them in a board', () => {
+    const spec = {
+      id: 'Test_FPC_0.5mm_4P', description: 'test connector', mount: 'smd' as const, edge: 'bottom' as const, bodyKind: 'box' as const, bodyW: 6, bodyH: 4, bodyZ: 1, bodyColor: '#ece6d2', courtyardW: 0, courtyardH: 0, bridgedPins: [],
+      pads: [
+        ...[0, 1, 2, 3].map((i) => ({ pin: String(i + 1), name: ['VDD', 'SDA', 'SCL', 'GND'][i], x: -0.75 + i * 0.5, y: 1.0, w: 0.3, h: 1.2, shape: 'rect' as const, type: 'smd' as const, drill: 0, slotW: 0, slotH: 0 })),
+        { pin: 'MP', name: '', x: -2.5, y: -0.5, w: 1.2, h: 1.8, shape: 'rect' as const, type: 'smd' as const, drill: 0, slotW: 0, slotH: 0 },
+        { pin: 'MP', name: '', x: 2.5, y: -0.5, w: 1.2, h: 1.8, shape: 'rect' as const, type: 'smd' as const, drill: 0, slotW: 0, slotH: 0 },
+      ],
+    };
+    expect(registerCustomFootprints([spec, { ...spec, id: 'R_0603' }])).toEqual([expect.stringContaining('library')]);
+    const f = getFootprint('Test_FPC_0.5mm_4P')!;
+    expect(f.pinCount).toBe(5);
+    expect(f.approx).toBe(true);
+    expect(resolvePin(f, 'SDA')).toBe('2');
+    expect(f.bridgedPins).toEqual(['MP']);
+    const d = {
+      name: 'Custom', description: '', notes: [], board: { width: 0, height: 0, cornerRadius: 1 }, customFootprints: [spec],
+      components: [
+        { ref: 'J1', footprint: 'Test_FPC_0.5mm_4P', value: 'FPC', description: '', manufacturer: '', mpn: '', lcsc: '' },
+        { ref: 'R1', footprint: 'R_0603', value: '4.7k', description: '', manufacturer: '', mpn: '', lcsc: '' },
+        { ref: 'R2', footprint: 'R_0603', value: '4.7k', description: '', manufacturer: '', mpn: '', lcsc: '' },
+      ],
+      nets: [{ name: 'VDD', pins: ['J1.VDD', 'R1.1', 'R2.1'] }, { name: 'SDA', pins: ['J1.SDA', 'R1.2'] }, { name: 'SCL', pins: ['J1.SCL', 'R2.2'] }, { name: 'GND', pins: ['J1.GND', 'J1.MP'] }],
+    } as unknown as Design;
+    const b = runPipeline(d, DEFAULT_SETTINGS);
+    expect(b.comps.find((c) => c.ref === 'J1')?.fp.id).toBe('Test_FPC_0.5mm_4P');
+    expect(b.warnings?.join(' ') ?? '').not.toMatch(/unknown footprint/);
+    expect(runDrc(b).filter((x) => x.kind !== 'warning').map((x) => x.msg)).toEqual([]);
+    registerCustomFootprints([]);
+    expect(getFootprint('Test_FPC_0.5mm_4P')).toBeUndefined();
   });
 });

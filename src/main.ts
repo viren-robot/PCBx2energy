@@ -5,7 +5,7 @@ import { generateDesign, MODELS, validateApiKey } from './ai';
 import { adminLogin, deleteCloudDesign, displayName, isAdminSession, listCloudDesigns, saveCloudDesign, sendMagicLink, signOut, supabase } from './cloud';
 import { runDrc, runLvs, type DrcIssue } from './drc';
 import { bomLines, buildFabPackage, FABS, type OutFile } from './export';
-import { FOOTPRINT_IDS, approxFootprints, getFootprint, resolvePin } from './footprints';
+import { FOOTPRINT_IDS, approxFootprints, customFootprintIds, getFootprint, registerCustomFootprints, resolvePin } from './footprints';
 import { buildSchematic, schematicDownload, type Schematic } from './schematic';
 import { buildSilk, type Silk } from './silk';
 import { isStyleOnly, parseStyle } from './style';
@@ -330,6 +330,12 @@ async function relayout(d: Design, msg?: string) {
 
 function setBoard(b: Board | null, keepView = false) {
   board = b;
+  if (b) {
+    registerCustomFootprints(b.design.customFootprints);
+    const sel = $<HTMLSelectElement>('e-fp');
+    const want = [...customFootprintIds(), ...FOOTPRINT_IDS];
+    if (sel.options.length !== want.length) sel.innerHTML = want.map((f) => `<option>${f}</option>`).join('');
+  }
   if (b) Object.assign(b.settings, { maskColor: settings.maskColor, silkColor: settings.silkColor, finish: settings.finish });
   silk = b ? buildSilk(b) : null;
   drc = b ? runDrc(b) : [];

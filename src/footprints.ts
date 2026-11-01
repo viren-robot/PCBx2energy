@@ -1,7 +1,8 @@
 // Footprint library. Pad geometry follows KiCad / IPC-7351 nominal land patterns, with the
 // footprint origin at the body centre and the same visual orientation as KiCad (pin 1 top-left
 // for ICs), converted to a +Y-up frame. This keeps JLCPCB rotation corrections valid.
-import type { FootprintDef, PadDef, BodyKind } from './types';
+import type { FootprintDef, PadDef, BodyKind, CustomFootprintSpec } from './types';
+import { KICAD_FOOTPRINTS } from './footprints_kicad';
 
 const fps: FootprintDef[] = [];
 const add = (f: Omit<FootprintDef, 'pinCount'>) => {
@@ -727,6 +728,7 @@ add({
   pads: [tht('1', 0, 0, 6.0, 6.0, 3.2)], body: { w: 3.2, h: 3.2, z: 0, kind: 'hole' }, courtyard: { w: 7.0, h: 7.0 },
 });
 
+for (const f of KICAD_FOOTPRINTS) add(f);
 for (const f of fps) if (approxIds.has(f.id)) f.approx = true;
 
 export const FOOTPRINTS: Record<string, FootprintDef> = Object.fromEntries(fps.map((f) => [f.id, f]));
@@ -744,9 +746,11 @@ const SYNONYMS: Record<string, string> = {
 
 export function getFootprint(id: string): FootprintDef | undefined {
   if (FOOTPRINTS[id]) return FOOTPRINTS[id];
+  if (custom.has(id)) return custom.get(id);
   const norm = id.replace(/\s+/g, '').toLowerCase();
   const f = fps.find((x) => x.id.toLowerCase() === norm);
   if (f) return f;
+  for (const [cid, cf] of custom) if (cid.toLowerCase() === norm) return cf;
   const syn = SYNONYMS[norm];
   if (syn && FOOTPRINTS[syn]) return FOOTPRINTS[syn];
   // common forms: "0603 resistor", "R0603", "PinHeader_1x4"
@@ -775,8 +779,78 @@ export function resolvePin(fp: FootprintDef, pin: string): string | undefined {
 
 /** Footprints used by a board that have nominal (non-verified) geometry. */
 export function approxFootprints(ids: Iterable<string>): string[] {
-  return [...new Set([...ids])].filter((id) => FOOTPRINTS[id]?.approx);
+  return [...new Set([...ids])].filter((id) => getFootprint(id)?.approx);
 }
+
+// ---------------- AI-created footprints ----------------
+const custom = new Map<string, FootprintDef>();
+export function customFootprintIds(): string[] { return [...custom.keys()]; }
+
+const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+/** Replace the custom footprint registry with those of a design. Returns human-readable problems. */
+export function registerCustomFootprints(specs: CustomFootprintSpec[] | undefined): string[] {
+  custom.clear();
+  const warnings: string[] = [];
+  for (const s of Array.isArray(specs) ? specs : []) {
+    if (!s || typeof s.id !== 'string' || !Array.isArray(s.pads)) continue;
+    const id = s.id.trim().replace(/[^A-Za-z0-9_.+\-]/g, '_').slice(0, 60);
+    if (!id) continue;
+    if (FOOTPRINTS[id]) { warnings.push(`Custom footprint "${id}" has the same name as a library footprint - the library one is used.`); continue; }
+    const pads: PadDef[] = [];
+    for (const q of s.pads.slice(0, 800)) {
+      if (!q) continue;
+      const pin = String(q.pin ?? '').trim() || 'MP';
+      const type = q.type === 'tht' || q.type === 'npth' ? q.type : 'smd';
+      const shape = q.shape === 'circle' || q.shape === 'oval' ? q.shape : 'rect';
+      const w = clamp(num(q.w, 1), 0.05, 80), h = clamp(num(q.h, 1), 0.05, 80);
+      const pad: PadDef = { pin, x: clamp(num(q.x), -200, 200), y: clamp(num(q.y), -200, 200), w, h, shape: type === 'smd' ? shape : shape === 'rect' ? 'rect' : shape, type };
+      const drill = num(q.drill), sw = num(q.slotW), sh = num(q.slotH);
+      if (type !== 'smd') {
+        if (sw > 0 && sh > 0 && Math.abs(sw - sh) > 1e-3) pad.slot = { w: clamp(sw, 0.2, 80), h: clamp(sh, 0.2, 80) };
+        else pad.drill = clamp(drill > 0 ? drill : type === 'npth' ? Math.min(w, h) : Math.min(w, h) * 0.6, 0.2, 40);
+      }
+      pads.push(pad);
+    }
+    if (!pads.length) { warnings.push(`Custom footprint "${id}" has no pads and was ignored.`); continue; }
+    const real = pads.filter((p) => p.type !== 'npth');
+    const aliases: Record<string, string> = {};
+    for (const q of s.pads) {
+      const nm = String(q?.name ?? '').trim(), pin = String(q?.pin ?? '').trim() || 'MP';
+      if (nm && nm !== pin && !(nm in aliases)) aliases[nm] = pin;
+    }
+    const counts = new Map<string, number>();
+    for (const p of real) counts.set(p.pin, (counts.get(p.pin) ?? 0) + 1);
+    const bridged = new Set<string>([...counts].filter(([, n]) => n > 1).map(([k]) => k));
+    for (const b of Array.isArray(s.bridgedPins) ? s.bridgedPins : []) if (counts.has(String(b))) bridged.add(String(b));
+    // pad overlap sanity check
+    let overlap = '';
+    for (let i = 0; i < real.length && !overlap; i++) for (let j = i + 1; j < real.length; j++) {
+      const a = real[i], b = real[j];
+      if (a.pin !== b.pin && Math.abs(a.x - b.x) < (a.w + b.w) / 2 - 1e-6 && Math.abs(a.y - b.y) < (a.h + b.h) / 2 - 1e-6) { overlap = `${a.pin}/${b.pin}`; break; }
+    }
+    if (overlap) warnings.push(`Custom footprint "${id}": pads ${overlap} overlap - check the land pattern.`);
+    let hx = 0, hy = 0;
+    for (const p of pads) { hx = Math.max(hx, Math.abs(p.x) + p.w / 2); hy = Math.max(hy, Math.abs(p.y) + p.h / 2); }
+    const bw = clamp(num(s.bodyW) || hx * 2, 0.2, 200), bh = clamp(num(s.bodyH) || hy * 2, 0.2, 200);
+    const kind: BodyKind = (['box', 'ic', 'qfn', 'cylinder', 'module'] as const).includes(s.bodyKind) ? s.bodyKind : 'box';
+    const colorM = /^#?([0-9a-f]{6})$/i.exec(String(s.bodyColor ?? '').trim());
+    const def: FootprintDef = {
+      id, mount: s.mount === 'tht' || pads.some((p) => p.type === 'tht') ? 'tht' : 'smd', approx: true, pads,
+      description: `AI-created footprint${s.description ? `: ${s.description}` : ''}`,
+      body: { w: bw, h: bh, z: clamp(num(s.bodyZ, 2), 0, 60), kind, ...(colorM ? { color: parseInt(colorM[1], 16) } : {}) },
+      courtyard: { w: Math.max(num(s.courtyardW), hx * 2 + 0.5, bw + 0.3), h: Math.max(num(s.courtyardH), hy * 2 + 0.5, bh + 0.3) },
+      pinCount: new Set(real.map((p) => p.pin)).size,
+    };
+    if (s.edge === 'top' || s.edge === 'bottom') def.edge = s.edge;
+    if (Object.keys(aliases).length) def.aliases = aliases;
+    if (bridged.size) def.bridgedPins = [...bridged];
+    custom.set(id, def);
+  }
+  return warnings;
+}
+
 
 const CATALOG_GROUPS: [RegExp, string][] = [
   [/^PinHeader_1x\d\d$/, '- PinHeader_1x01 .. PinHeader_1x20: male header 1 row, 2.54mm, pins 1..N.'],

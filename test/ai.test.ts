@@ -34,7 +34,8 @@ describe('Claude design generation (mocked API)', () => {
     expect(c.body.model).toBe('claude-opus-5-5');
     expect(c.body.stream).toBe(true);
     expect(c.body.output_config.format.type).toBe('json_schema');
-    expect(c.body.output_config.format.schema.properties.components.items.properties.footprint.enum).toContain('SOIC-8');
+    expect(c.body.output_config.format.schema.required).toContain('customFootprints');
+    expect(c.body.output_config.format.schema.properties.customFootprints.items.properties.pads.items.required).toContain('drill');
     expect(c.body.fallbacks).toBe('default');
     expect(c.headers.get('anthropic-beta')).toContain('server-side-fallback-2026-07-01');
     expect(c.headers.get('anthropic-dangerous-direct-browser-access')).toBe('true');

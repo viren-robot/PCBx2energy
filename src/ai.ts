@@ -1,7 +1,7 @@
 // Claude-powered text-to-circuit: turns a natural-language request into a structured Design.
 // Runs in the browser with the user's own API key (stored only in localStorage).
 import Anthropic from '@anthropic-ai/sdk';
-import { FOOTPRINT_IDS, footprintCatalog } from './footprints';
+import { footprintCatalog } from './footprints';
 import type { Design } from './types';
 
 export const MODELS = [
@@ -14,7 +14,7 @@ export const MODELS = [
 const DESIGN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['name', 'description', 'board', 'components', 'nets', 'notes', 'labels', 'style'],
+  required: ['name', 'description', 'board', 'components', 'nets', 'notes', 'labels', 'style', 'customFootprints'],
   properties: {
     name: { type: 'string', description: 'Short board name (max ~30 chars), printed on silkscreen.' },
     description: { type: 'string' },
@@ -37,7 +37,7 @@ const DESIGN_SCHEMA = {
         required: ['ref', 'footprint', 'value', 'description', 'manufacturer', 'mpn', 'lcsc'],
         properties: {
           ref: { type: 'string', description: 'Reference designator: R1, C3, U1, D2, J1, SW1, Q1, Y1, L1, F1, H1...' },
-          footprint: { type: 'string', enum: FOOTPRINT_IDS },
+          footprint: { type: 'string', description: 'Exact id of a library footprint from the catalog, or the id of a footprint you define in customFootprints.' },
           value: { type: 'string', description: 'e.g. 10k, 100nF, AMS1117-3.3, red' },
           description: { type: 'string' },
           manufacturer: { type: 'string', description: 'Empty string if generic.' },
@@ -73,6 +73,50 @@ const DESIGN_SCHEMA = {
         },
       },
     },
+    customFootprints: {
+      type: 'array',
+      description: 'Footprints you create when the library has no match (SD sockets, odd connectors, modules, BGAs, relays...). Return the full list every time, including ones from earlier versions. Use [] when the library is enough.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'description', 'mount', 'edge', 'bodyKind', 'bodyW', 'bodyH', 'bodyZ', 'bodyColor', 'courtyardW', 'courtyardH', 'pads', 'bridgedPins'],
+        properties: {
+          id: { type: 'string', description: 'Unique id, e.g. Conn_FPC_0.5mm_24P or BGA-100_10x10_P0.8. Never reuse a library id.' },
+          description: { type: 'string', description: 'What the part is, its manufacturer part number and the pin functions.' },
+          mount: { type: 'string', enum: ['smd', 'tht'] },
+          edge: { type: 'string', enum: ['', 'top', 'bottom'], description: 'For connectors that must sit on the board edge: the side of the footprint (top = +y, bottom = -y) that faces OUTWARD. Empty otherwise.' },
+          bodyKind: { type: 'string', enum: ['box', 'ic', 'qfn', 'cylinder', 'module'], description: '3D look: box = generic block, ic = gull-wing leads, qfn = leadless chip, cylinder = round, module = shielded RF module.' },
+          bodyW: { type: 'number', description: 'Body width (x) in mm.' },
+          bodyH: { type: 'number', description: 'Body height (y) in mm.' },
+          bodyZ: { type: 'number', description: 'Body thickness above the board in mm.' },
+          bodyColor: { type: 'string', description: '#rrggbb or empty.' },
+          courtyardW: { type: 'number' },
+          courtyardH: { type: 'number' },
+          pads: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['pin', 'name', 'x', 'y', 'w', 'h', 'shape', 'type', 'drill', 'slotW', 'slotH'],
+              properties: {
+                pin: { type: 'string', description: 'Pad number/name used in nets (1, 2, A1, GND...). Pads sharing a pin id are one electrical pin.' },
+                name: { type: 'string', description: 'Pin FUNCTION shown on the schematic and usable in nets (VDD, SDA, TX+...). Empty if none.' },
+                x: { type: 'number', description: 'Pad centre x in mm from the footprint origin (body centre); +x = right.' },
+                y: { type: 'number', description: 'Pad centre y in mm; +y = up/top (pin 1 of ICs is top-left).' },
+                w: { type: 'number', description: 'Pad size along x in mm.' },
+                h: { type: 'number', description: 'Pad size along y in mm.' },
+                shape: { type: 'string', enum: ['rect', 'circle', 'oval'] },
+                type: { type: 'string', enum: ['smd', 'tht', 'npth'] },
+                drill: { type: 'number', description: 'Round hole diameter for tht/npth pads, else 0.' },
+                slotW: { type: 'number', description: 'Slot width for slotted holes, else 0.' },
+                slotH: { type: 'number', description: 'Slot height for slotted holes, else 0.' },
+              },
+            },
+          },
+          bridgedPins: { type: 'array', items: { type: 'string' }, description: 'Pin ids whose several pads are connected inside the part (shield, thermal pad). Usually [].' },
+        },
+      },
+    },
     style: {
       type: 'object',
       additionalProperties: false,
@@ -95,6 +139,7 @@ Rules:
 - Every component must be connected; every net needs >= 2 pins. Pins are written REF.PIN where PIN is a pin number or a documented pin name/alias for that footprint.
 - Name the ground net exactly "GND". Use clear power net names (VBUS, 5V, 3V3, VBAT, VIN).
 - Include what a real board needs: decoupling caps (100nF per IC power pin + bulk), pull-ups/pull-downs, LED current-limit resistors, CC 5.1k resistors for USB-C sinks, regulator in/out caps, crystal load caps, reset/boot circuitry, programming header.
+- If NO library footprint matches a part you need (SD socket, RJ45, FPC, relay, BGA, a specific module...), CREATE one yourself in customFootprints from the part's datasheet land pattern - never ask the user and never substitute a wrong footprint. Origin = body centre, +y = up, pin 1 of ICs top-left. Give every pad its pin id and (in "name") its function. Library footprints marked [nominal geometry] and AI-created ones are flagged for the user to check against the datasheet.
 - Prefer SMD 0603 passives, JLCPCB basic parts. Fill lcsc only if you are confident of the part number; otherwise leave it empty. Fill manufacturer + mpn for ICs, connectors and semiconductors.
 - Do not invent pins. For ICs use datasheet pin numbers matching the package.
 - Choose board.layers deliberately (2, 4, 6, 8 or 10) and say why in notes. Ground and the main power rail become inner planes on 4+ layer boards. OSH Park only builds 2 and 4 layers.
@@ -198,6 +243,7 @@ export function normalizeDesign(design: Design): Design {
   design.board ??= { width: 0, height: 0, cornerRadius: 1 };
   design.board.layers = [2, 4, 6, 8, 10].includes(design.board.layers ?? 0) ? design.board.layers : undefined;
   design.notes ??= [];
+  design.customFootprints = Array.isArray(design.customFootprints) ? design.customFootprints.filter((f) => f && typeof f.id === 'string' && Array.isArray(f.pads)) : [];
   design.labels = (design.labels ?? []).filter((l) => l && l.ref && l.text).map((l) => ({ ref: l.ref, text: l.text.toUpperCase().slice(0, 10), pin: l.pin || undefined }));
   const st = design.style ?? {};
   design.style = {

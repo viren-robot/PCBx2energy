@@ -98,6 +98,24 @@ export interface DesignStyle {
   finish?: 'HASL' | 'ENIG';
 }
 
+/** A footprint defined by the AI (from a datasheet land pattern) and stored inside the design. */
+export interface CustomFootprintSpec {
+  id: string;
+  description: string;
+  mount: 'smd' | 'tht';
+  /** '' for none; otherwise the side (footprint frame) that faces outward for edge connectors. */
+  edge: '' | 'top' | 'bottom';
+  bodyKind: 'box' | 'ic' | 'qfn' | 'cylinder' | 'module';
+  bodyW: number;
+  bodyH: number;
+  bodyZ: number;
+  bodyColor: string;
+  courtyardW: number;
+  courtyardH: number;
+  pads: { pin: string; name: string; x: number; y: number; w: number; h: number; shape: PadShape; type: PadType; drill: number; slotW: number; slotH: number }[];
+  bridgedPins: string[];
+}
+
 export interface Design {
   name: string;
   description: string;
@@ -109,6 +127,8 @@ export interface Design {
   labels?: DesignLabel[];
   /** Board appearance requested by the user ("make the PCB matte black"). */
   style?: DesignStyle;
+  /** Footprints the AI created for this design (used when the built-in library has no match). */
+  customFootprints?: CustomFootprintSpec[];
 }
 
 // ---------- Physical board ----------

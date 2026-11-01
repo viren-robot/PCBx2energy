@@ -1,5 +1,5 @@
 // Turns a logical Design into a placed physical Board (no routing yet).
-import { getFootprint, resolvePin } from './footprints';
+import { getFootprint, registerCustomFootprints, resolvePin } from './footprints';
 import { buildStackup, normalizeLayers } from './stackup';
 import type { Board, Design, DesignComponent, FootprintDef, NetInfo, PlacedComponent, Settings, WorldPad } from './types';
 
@@ -48,7 +48,7 @@ interface Prepared {
 }
 
 export function prepare(design: Design): Prepared {
-  const warnings: string[] = [];
+  const warnings: string[] = registerCustomFootprints(design.customFootprints);
   const comps: Prepared['comps'] = [];
   const refs = new Set<string>();
   for (const c of design.components) {
