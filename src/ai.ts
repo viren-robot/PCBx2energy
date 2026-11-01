@@ -249,3 +249,23 @@ function friendlyError(e: unknown): Error {
   if (e instanceof Anthropic.APIError) return new Error(`Claude API error ${e.status ?? ''}: ${e.message}`);
   return e instanceof Error ? e : new Error(String(e));
 }
+
+/** Check an API key (and that it can use `model`) with a free metadata call before it is saved. */
+export async function validateApiKey(apiKey: string, model: string, opts: { fetch?: typeof fetch; timeoutMs?: number } = {}): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!/^sk-ant-/.test(apiKey)) return { ok: false, error: 'That does not look like an Anthropic key. It should start with "sk-ant-".' };
+  const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 0, ...(opts.fetch ? { fetch: opts.fetch } : {}) });
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), opts.timeoutMs ?? 15_000);
+  try {
+    await client.models.retrieve(model, {}, { signal: ctl.signal });
+    return { ok: true };
+  } catch (e) {
+    if (ctl.signal.aborted) return { ok: false, error: 'Could not check the key (timed out after 15 seconds). Check your connection and try again.' };
+    if (e instanceof Anthropic.AuthenticationError) return { ok: false, error: 'Invalid API key (401). Check that you copied the whole key.' };
+    if (e instanceof Anthropic.PermissionDeniedError) return { ok: false, error: 'This key is not allowed to use that model (403). Pick another model.' };
+    if (e instanceof Anthropic.NotFoundError) return { ok: false, error: 'The key works, but this account cannot use the selected model (404). Pick another model.' };
+    if (e instanceof Anthropic.RateLimitError) return { ok: true }; // rate limited means the key was accepted
+    if (e instanceof Anthropic.APIConnectionError) return { ok: false, error: 'Could not reach api.anthropic.com. Check your network connection.' };
+    return { ok: false, error: `Could not verify the key: ${(e as Error).message}` };
+  } finally { clearTimeout(t); }
+}

@@ -67,3 +67,11 @@ describe('Claude design generation (mocked API)', () => {
     await expect(generateDesign({ apiKey: 'bad', model: 'claude-haiku-5-5', prompt: 'x', fetch: unauth })).rejects.toThrow(/Invalid API key/);
   });
 });
+
+import { validateApiKey } from '../src/ai';
+describe('validateApiKey', () => {
+  const mk = (status: number) => (async () => new Response(JSON.stringify(status === 200 ? { id: 'm', type: 'model' } : { type: 'error', error: { type: 'x', message: 'no' } }), { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+  it('rejects wrong format without a request', async () => { expect((await validateApiKey('abc', 'm')).ok).toBe(false); });
+  it('accepts a valid key', async () => { expect((await validateApiKey('sk-ant-x', 'm', { fetch: mk(200) })).ok).toBe(true); });
+  it('rejects 401', async () => { const r = await validateApiKey('sk-ant-x', 'm', { fetch: mk(401) }); expect(r.ok).toBe(false); });
+});

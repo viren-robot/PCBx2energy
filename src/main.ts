@@ -1,7 +1,7 @@
 import type { Session } from '@supabase/supabase-js';
 import * as THREE from 'three';
 import './style.css';
-import { generateDesign, MODELS } from './ai';
+import { generateDesign, MODELS, validateApiKey } from './ai';
 import { adminLogin, deleteCloudDesign, displayName, isAdminSession, listCloudDesigns, saveCloudDesign, sendMagicLink, signOut, supabase } from './cloud';
 import { runDrc, runLvs, type DrcIssue } from './drc';
 import { bomLines, buildFabPackage, FABS, type OutFile } from './export';
@@ -875,8 +875,21 @@ $<HTMLInputElement>('json-file').addEventListener('change', async (e) => {
 const dlg = $<HTMLDialogElement>('settings');
 const modelSel = $<HTMLSelectElement>('s-model');
 modelSel.innerHTML = MODELS.map((m) => `<option value="${m.id}">${m.label}</option>`).join('');
-$('btn-settings').onclick = () => { $<HTMLInputElement>('s-key').value = apiKey; modelSel.value = model; dlg.showModal(); };
+$('btn-settings').onclick = () => { $('s-msg').textContent = ''; $<HTMLInputElement>('s-key').value = apiKey; modelSel.value = model; dlg.showModal(); };
 $('ai-mode').onclick = () => $('btn-settings').click();
+$('s-save').addEventListener('click', async (ev) => {
+  ev.preventDefault();
+  const key = $<HTMLInputElement>('s-key').value.trim();
+  const msg = $('s-msg');
+  if (!key) { dlg.close('save'); return; } // empty = demo mode
+  const btn = $<HTMLButtonElement>('s-save');
+  btn.disabled = true; btn.textContent = 'Checking key…';
+  msg.className = 'amsg'; msg.textContent = '';
+  const r = await validateApiKey(key, modelSel.value);
+  btn.disabled = false; btn.textContent = 'Save';
+  if (r.ok) dlg.close('save');
+  else { msg.className = 'amsg err'; msg.textContent = r.error; }
+});
 dlg.addEventListener('close', () => {
   if (dlg.returnValue === 'save') {
     apiKey = $<HTMLInputElement>('s-key').value.trim();
