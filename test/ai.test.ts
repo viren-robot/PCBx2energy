@@ -39,7 +39,7 @@ describe('Claude design generation (mocked API)', () => {
     expect(c.headers.get('anthropic-beta')).toContain('server-side-fallback-2026-07-01');
     expect(c.headers.get('anthropic-dangerous-direct-browser-access')).toBe('true');
     expect(c.headers.get('authorization')).toBe('Bearer sk-ant-test');
-    expect(progress.some((p) => /designing/.test(p))).toBe(true);
+    expect(progress.some((p) => /Claude is working/.test(p))).toBe(true);
     // the AI output goes through the real pipeline
     const board = runPipeline(d, DEFAULT_SETTINGS);
     expect(board.unrouted.length).toBe(0);
