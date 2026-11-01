@@ -122,6 +122,10 @@ export interface AiOptions {
 
 interface CallOpts { apiKey: string; model: string; system: string; userText: string; onProgress?: (msg: string) => void; signal?: AbortSignal; fetch?: typeof fetch; label: string }
 
+const FIRST_BYTE_MS = 90_000;
+const STALL_MS = 60_000;
+const TOTAL_MS = 8 * 60_000;
+
 async function requestDesign(o: CallOpts): Promise<Design> {
   const client = new Anthropic({ apiKey: o.apiKey, dangerouslyAllowBrowser: true, maxRetries: 2, ...(o.fetch ? { fetch: o.fetch } : {}) });
   const useFallbacks = o.model !== 'claude-haiku-5-5';
@@ -135,24 +139,46 @@ async function requestDesign(o: CallOpts): Promise<Design> {
   };
   o.onProgress?.(`${o.label}: sending request to Claude…`);
   let chars = 0;
+  // Timeouts: give up if nothing arrives for FIRST_BYTE_MS, if the stream stalls for STALL_MS, or after TOTAL_MS overall.
+  const ctl = new AbortController();
+  const onUserAbort = () => ctl.abort();
+  if (o.signal?.aborted) ctl.abort(); else o.signal?.addEventListener('abort', onUserAbort, { once: true });
+  let timedOut = '';
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (ms: number, why: string) => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { timedOut = why; ctl.abort(); }, ms);
+  };
+  arm(FIRST_BYTE_MS, `Claude did not start replying within ${FIRST_BYTE_MS / 1000} seconds`);
+  const totalTimer = setTimeout(() => { timedOut = `The design took longer than ${TOTAL_MS / 60000} minutes`; ctl.abort(); }, TOTAL_MS);
   const run = async (p: typeof params) => {
-    const stream = client.beta.messages.stream(p, { signal: o.signal });
+    const stream = client.beta.messages.stream(p, { signal: ctl.signal });
     stream.on('text', (delta) => {
       chars += delta.length;
+      arm(STALL_MS, `Claude stopped responding for ${STALL_MS / 1000} seconds`);
       o.onProgress?.(`${o.label}: Claude is working… ${chars.toLocaleString()} chars`);
     });
     return stream.finalMessage();
   };
   let msg;
   try {
-    msg = await run(params);
+    try {
+      msg = await run(params);
+    } catch (e) {
+      // If the account/platform rejects the fallback beta, retry once without it.
+      if (!timedOut && e instanceof Anthropic.BadRequestError && /fallback/i.test(e.message) && useFallbacks) {
+        const { betas: _b, fallbacks: _f, ...rest } = params as typeof params & { betas?: unknown; fallbacks?: unknown };
+        void _b; void _f;
+        msg = await run(rest as typeof params);
+      } else throw e;
+    }
   } catch (e) {
-    // If the account/platform rejects the fallback beta, retry once without it.
-    if (e instanceof Anthropic.BadRequestError && /fallback/i.test(e.message) && useFallbacks) {
-      const { betas: _b, fallbacks: _f, ...rest } = params as typeof params & { betas?: unknown; fallbacks?: unknown };
-      void _b; void _f;
-      msg = await run(rest as typeof params);
-    } else throw friendlyError(e);
+    if (timedOut) throw new Error(`Timed out: ${timedOut}. Check your internet connection and API key, pick a faster model in Settings, or try a simpler description, then press Create again.`);
+    throw friendlyError(e);
+  } finally {
+    clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
+    o.signal?.removeEventListener('abort', onUserAbort);
   }
   if (msg.stop_reason === 'refusal') throw new Error('Claude declined this request. Try rephrasing it.');
   if (msg.stop_reason === 'max_tokens') throw new Error('The design was too large for one response. Try a simpler board or fewer parts.');

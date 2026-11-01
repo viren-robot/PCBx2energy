@@ -93,10 +93,17 @@ function runJob(kind: 'layout' | 'verify', d: Design, s: Settings, onRun?: (r: D
 }
 
 // ---------------- UI helpers ----------------
+let statusMsg = '';
+let busySince = 0;
+let busyTicker: ReturnType<typeof setInterval> | undefined;
+function fmtElapsed(ms: number) { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+function renderStatus(kind: string) {
+  $('status').textContent = kind === 'busy' && busySince ? `${statusMsg}  ⏱ ${fmtElapsed(Date.now() - busySince)}` : statusMsg;
+}
 function setStatus(msg: string, kind: 'idle' | 'busy' | 'err' | 'ok' = 'idle') {
-  const el = $('status');
-  el.textContent = msg;
-  el.className = `status ${kind}`;
+  statusMsg = msg;
+  $('status').className = `status ${kind}`;
+  renderStatus(kind);
 }
 function setProgress(f: number) { $('progress-bar').style.width = `${Math.round(Math.max(0, Math.min(1, f)) * 100)}%`; }
 function say(html: string, who: 'ai' | 'user' | 'sys' = 'ai', cls = '') {
@@ -113,7 +120,11 @@ function setBusy(on: boolean) {
   busy = on;
   for (const id of ['btn-generate', 'btn-reroute', 'btn-json-apply', 'e-add', 'sch-regen']) $<HTMLButtonElement>(id).disabled = on;
   $('btn-cancel').classList.toggle('hidden', !on);
-  if (!on) setProgress(0);
+  clearInterval(busyTicker);
+  if (on) {
+    busySince = Date.now();
+    busyTicker = setInterval(() => { if ($('status').classList.contains('busy')) renderStatus('busy'); }, 1000);
+  } else { busySince = 0; setProgress(0); }
 }
 function updateAiMode() {
   const el = $('ai-mode');
